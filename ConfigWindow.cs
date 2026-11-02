@@ -60,11 +60,11 @@ public sealed class ConfigWindow : Window
         if (config.UseGameCommand)
         {
             ImGui.Text(U8($"模板: {config.GameCommandFormat}"));
-            ImGui.Text(U8("  {P} = 目标写法（优先 <N> 队伍序号，算不出序号才退 <t>）"));
-            ImGui.Text(U8("  {0} = 队友名，{1} = 小队序号（队伍列表位置，从 1 起算）"));
+            ImGui.Text(U8("  {P} = 目标写法（优先切目标 + <t>，关掉切目标时才退 <N>）"));
+            ImGui.Text(U8("  {0} = 队友名，{1} = 小队编号（自己恒为 1，其余人依次 2、3…）"));
             ImGui.Text(U8("  国际服写 /ridepillion {P}"));
-            ImGui.Text(U8("  小队序号 1 号也可能是队友：不再假设「1 号恒为自己」"));
-            ImGui.Text(U8("  序号也就算不出来才这一轮不动，绝不瞎猜目标"));
+            ImGui.Text(U8("  小队编号 1 恒为自己：对自己发「共同骑乘 <1>」游戏会报目标名不正确"));
+            ImGui.Text(U8("  所以主路线是切目标 + <t>：不依赖编号语义，切完读回来确认才发"));
             ImGui.Text(U8($"聊天框通道: {this.plugin.ChatChannelName}"));
             ImGui.Text(U8($"  {this.plugin.ChatChannelStatus}"));
 
@@ -146,13 +146,13 @@ public sealed class ConfigWindow : Window
         ImGui.Text(U8("  单人时插件完全休眠：不扫对象表、不读 Excel 表、不做任何判断"));
         ImGui.Text(U8("  跨服小队（跨服组队 / 跨服团队）同样完全休眠：队友实体不在本地对象表里"));
         ImGui.Text(U8("  刚下坐骑后静默 1.5 秒：那一瞬间状态还在收尾，判断最容易踩空"));
-        ImGui.Text(U8("  目标写法：优先队伍序号 <N>（1-8，1 号也可能是队友），序号算不出来才切目标用 <t> 兜底"));
-        ImGui.Text(U8("  序号能用就绝不碰你的当前目标；两条都不成立才不发：宁可这一轮不动，也不给游戏送红字"));
+        ImGui.Text(U8("  目标写法：先切目标再用 <t>（切完读回来确认），不依赖小队编号"));
+        ImGui.Text(U8("  小队编号 1 恒为自己（副本外）：关掉切目标时才用它兜底，且永不发 <1>"));
         ImGui.Text(U8("  指令发出后 2 秒内，聊天框里带「出现问题」的错误提示会被自动吞掉"));
-        ImGui.Text(U8("  万一走了 <t> 兜底：目标要等指令执行完才还原（约 0.7 秒），发完立刻还原会让 <t> 解析失败"));
+        ImGui.Text(U8("  目标要等指令执行完才还原（约 0.7 秒），发完立刻还原会让 <t> 解析失败"));
 
         var setTarget = config.SetTargetBeforeCommand;
-        if (ImGui.Checkbox(U8("序号算不出来时，把目标切到该队友（用 <t> 兜底）"), ref setTarget))
+        if (ImGui.Checkbox(U8("触发前把目标切到该队友（用 <t> 发指令）"), ref setTarget))
         {
             config.SetTargetBeforeCommand = setTarget;
             config.Save();
@@ -164,7 +164,7 @@ public sealed class ConfigWindow : Window
         }
         else
         {
-            ImGui.Text(U8("(默认勾选：只在序号算不出来时才会真的去切，平时一次都不碰你的目标)"));
+            ImGui.Text(U8("(默认勾选：主路线就是它。切完会读回来确认，确认不了这一轮就不发)"));
         }
 
         var restore = config.RestoreTargetAfter;
@@ -172,6 +172,11 @@ public sealed class ConfigWindow : Window
         {
             config.RestoreTargetAfter = restore;
             config.Save();
+        }
+
+        if (!config.SetTargetBeforeCommand && config.UseGameCommand)
+        {
+            ImGui.Text(U8("(已关掉切目标：只能发小队编号 <N>。编号 1 是自己，插件不会发 <1>)"));
         }
 
         var oncePerSession = config.OncePerMountSession;

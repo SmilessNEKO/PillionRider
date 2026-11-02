@@ -34,8 +34,8 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>
     /// 走游戏指令时的模板。
     ///
-    /// 三个占位符：<c>{0}</c> = 队友名字、<c>{1}</c> = 队伍序号（1-8）、
-    /// <c>{P}</c> = 游戏认的目标写法（有队伍序号时是 <c>&lt;2&gt;</c>，拿不到时退 <c>&lt;t&gt;</c>）。
+    /// 三个占位符：<c>{0}</c> = 队友名字、<c>{1}</c> = 小队编号（自己恒为 1，其余人依次 2、3…）、
+    /// <c>{P}</c> = 游戏认的目标写法（切目标成功时是 <c>&lt;t&gt;</c>，关掉切目标时才退 <c>&lt;N&gt;</c>）。
     ///
     /// 默认 <c>/共同骑乘 {P}</c>。国服指令是 <c>/共同骑乘</c>，国际服要改成
     /// <c>/ridepillion {P}</c>。
@@ -83,7 +83,19 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>失败后拉黑多久（毫秒）。</summary>
     public int FailureBackoffMs { get; set; } = 60000;
 
-    /// <summary>执行动作前先把目标切到该队友。独立模式下不是必须的（动作自带 targetId），但保持与指令路线一致的行为。</summary>
+    /// <summary>
+    /// 执行前先把目标切到该队友，然后用 <c>&lt;t&gt;</c> 发指令（默认 <c>true</c>，主路线）。
+    ///
+    /// <b>为什么默认走这条路</b>：<c>&lt;N&gt;</c> 编号靠推导 —— 规则是「自己恒为
+    /// <c>&lt;1&gt;</c>、其余人依次 <c>&lt;2&gt;</c>、<c>&lt;3&gt;</c>…」（副本外队伍第一位
+    /// 只会是自己），而 <c>IPartyList</c> 的物理顺序不一定如此。推导一旦出偏差，
+    /// 就会出现「发出去的是 <c>&lt;1&gt;</c>、而那其实是我自己」，游戏回
+    /// 「1号指定的目标名不正确」。
+    /// <c>&lt;t&gt;</c> 是游戏在指令执行那一刻解析「当前选中的人」，不涉及编号语义。
+    ///
+    /// 关掉它就退回 <c>&lt;N&gt;</c> 编号写法（插件会挡掉 <c>&lt;1&gt;</c>）。
+    /// 独立模式下不是必须的（动作自带 targetId），但保持与指令路线一致的行为。
+    /// </summary>
     public bool SetTargetBeforeCommand { get; set; } = true;
 
     /// <summary>执行完指令后把目标还原。</summary>

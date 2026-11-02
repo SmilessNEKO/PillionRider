@@ -1,33 +1,33 @@
-[
-  {
-    "Author": "Neko",
-    "Name": "PillionRider",
-    "Punchline": "脱战后自动骑上队友的多人坐骑",
-    "Description": "脱战状态下检测队伍里是否有队友正骑着多人（共同）坐骑，若有则自动骑上去。直接发送游戏自带的「/共同骑乘」（国际服 /ridepillion）指令，走游戏自己的聊天框入口，不需要安装任何其它插件。右上角状态栏显示「PillionRider: on / off」，点一下即可启停。只有有队伍、且是同服小队时才工作：单人、跨服组队、跨服团队、副本内、战斗中一律完全休眠。支持距离限制、冷却、每次上坐骑只触发一次、失败重试与退避、700ms 延迟验证。",
-    "InternalName": "PillionRider",
-    "AssemblyVersion": "1.1.0",
-    "RepoUrl": "https://github.com/SmilessNEKO/PillionRider",
-    "ApplicableVersion": "any",
-    "DalamudApiLevel": 15,
-    "Tags": [
-      "mount",
-      "pillion",
-      "坐骑",
-      "自动",
-      "共乘"
-    ],
-    "CategoryTags": [
-      "utility"
-    ],
-    "LoadRequiredState": 0,
-    "LoadSync": false,
-    "CanUnloadAsync": false,
-    "LoadPriority": 0,
-    "IconUrl": "https://cdn.jsdelivr.net/gh/SmilessNEKO/PillionRider@main/assets/icon-512.png",
-    "ImageUrls": [],
-    "DownloadLinkInstall": "https://github.com/SmilessNEKO/PillionRider/releases/latest/download/latest.zip",
-    "DownloadLinkUpdate": "https://github.com/SmilessNEKO/PillionRider/releases/latest/download/latest.zip",
-    "DownloadLinkTesting": "https://github.com/SmilessNEKO/PillionRider/releases/latest/download/latest.zip",
-    "Changelog": "1.1.0：不再需要任何第三方插件 —— 指令改为直接调游戏自己的聊天框入口（UIModule.ProcessChatBoxEntry），装好即用。目标写法改为序号优先：优先发队伍序号 <N>（1-8，1 号也可能是队友），序号算不出来才切目标用 <t> 兜底，平时一次都不碰你的当前目标。下坐骑后静默 1.5 秒，指令发出后 2 秒内自动吞掉错误提示。"
-  }
-]
+{
+    "Author":  "Neko",
+    "Name":  "PillionRider",
+    "Punchline":  "脱战后自动骑上队友的多人坐骑",
+    "Description":  "脱战状态下检测队伍里是否有队友正骑着多人（共同）坐骑，若有则自动骑上去。直接发送游戏自带的「/共同骑乘」（国际服 /ridepillion）指令，走游戏自己的聊天框入口，不需要安装任何其它插件。右上角状态栏显示「PillionRider: on / off」，点一下即可启停。只有有队伍、且是同服小队时才工作：单人、跨服组队、跨服团队、副本内、战斗中一律完全休眠。支持距离限制、冷却、每次上坐骑只触发一次、失败重试与退避、700ms 延迟验证。",
+    "InternalName":  "PillionRider",
+    "AssemblyVersion":  "1.1.1",
+    "RepoUrl":  "https://github.com/SmilessNEKO/PillionRider",
+    "ApplicableVersion":  "any",
+    "DalamudApiLevel":  15,
+    "Tags":  [
+                 "mount",
+                 "pillion",
+                 "坐骑",
+                 "自动",
+                 "共乘"
+             ],
+    "CategoryTags":  [
+                         "utility"
+                     ],
+    "LoadRequiredState":  0,
+    "LoadSync":  false,
+    "CanUnloadAsync":  false,
+    "LoadPriority":  0,
+    "IconUrl":  "https://cdn.jsdelivr.net/gh/SmilessNEKO/PillionRider@main/assets/icon-512.png",
+    "ImageUrls":  [
+
+                  ],
+    "DownloadLinkInstall":  "https://github.com/SmilessNEKO/PillionRider/releases/latest/download/latest.zip",
+    "DownloadLinkUpdate":  "https://github.com/SmilessNEKO/PillionRider/releases/latest/download/latest.zip",
+    "DownloadLinkTesting":  "https://github.com/SmilessNEKO/PillionRider/releases/latest/download/latest.zip",
+    "Changelog":  "1.1.1：修掉「1号指定的目标名不正确」。小队编号改成「自己恒为 \u003c1\u003e、其余人按队伍顺序依次 \u003c2\u003e、\u003c3\u003e…」，并且永不发 \u003c1\u003e（那是自己）；主路线改为切目标 + \u003ct\u003e，切完读回来确认才发，编号只在关掉切目标时兜底。错误提示拦截改用 Dalamud 15 的新接口 IHandleableChatMessage.PreventOriginal，不再显示「未启用」。"
+}

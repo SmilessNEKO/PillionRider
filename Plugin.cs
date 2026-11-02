@@ -857,41 +857,46 @@ public sealed class Plugin : IDalamudPlugin
         public readonly HashSet<uint> EntityIds = new();
 
         /// <summary>
-        /// 名字 → 游戏里的队伍序号（就是 <c>/共同骑乘 &lt;N&gt;</c> 里那个 N）。
+        /// 名字 → 游戏文本指令认的小队编号（<c>/共同骑乘 &lt;N&gt;</c> 里那个 N）。
         ///
-        /// 算法只有一条：<b>这个人在这份队伍列表里的位置，从 1 起算</b>。
-        /// 游戏自己的定义就是这样 —— 官方说明里 <c>/技能 治疗 &lt;2&gt;</c> 写的是
-        /// 「对小队列表中的2号队员执行技能」。
+        /// <b>算法：自己恒为 &lt;1&gt;，其余人按 <c>IPartyList</c> 的顺序依次 &lt;2&gt;、&lt;3&gt;……</b>
         ///
-        /// <b>千万不要假设自己永远排第 1。</b> 谁在第 1 位由队伍槽位决定，
-        /// 自己在自己的客户端上排第几是不一定的。旧版本就靠这个假设发指令，
-        /// 结果「2 号（雷米娜大福）在 1 号（时花）骑多人坐骑时永远不动」——
-        /// 时花明明排在列表第 1 位，却被当成「1 号＝自己」丢掉，序号算成 0，
-        /// 一条指令都没发出去。
+        /// 为什么不是「<c>IPartyList</c> 下标 + 1」：<c>IPartyList</c> 是 GroupManager
+        /// 内存里的队员数组顺序（大致是入队顺序），而游戏 UI 的小队列表和 <c>&lt;N&gt;</c>
+        /// 占位符用的是「自己永远排第一」那套编号 —— 用户确认过：<b>副本外，队伍的第一个人
+        /// 只会是自己</b>（除非有特殊设置）。
+        ///
+        /// 现场那条报错正是这个差异造成的：B 的 <c>IPartyList</c> 是
+        /// <c>[时花, 蕾米娜大福(自己)]</c>，旧代码按「下标 + 1」算，于是时花 = <c>&lt;1&gt;</c>。
+        /// 可游戏的 <c>&lt;1&gt;</c> 是 B 自己 —— 发 <c>/共同骑乘 &lt;1&gt;</c> 等于对自己用，
+        /// 游戏回「1号指定的目标名不正确」。
         /// </summary>
         public readonly Dictionary<string, int> NameToIndex = new(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>EntityId → 队伍序号。</summary>
+        /// <summary>EntityId → 游戏文本指令认的小队编号（同上，自己恒为 1）。</summary>
         public readonly Dictionary<uint, int> EntityToIndex = new();
 
         /// <summary>IPartyList 里是否包含自己。</summary>
         public bool ContainsSelf;
 
-        /// <summary>自己排在第几位（1 起算）。0 = 没在列表里认出来。仅用于 /pr scan 展示。</summary>
-        public int SelfSlot;
+        /// <summary>自己在 <c>IPartyList</c> 里的原始位置（1 起算）。0 = 没认出来。仅供 /pr scan 展示。</summary>
+        public int SelfRawSlot;
     }
 
     /// <summary>
-    /// 收集队伍成员，并算出每个人在游戏文本指令里的 &lt;N&gt; 序号。
+    /// 收集队伍成员，并算出每个人在游戏文本指令里的 <c>&lt;N&gt;</c> 编号。
     ///
-    /// 序号就是「在 <c>IPartyList</c> 里的位置，从 1 起算」，和游戏官方定义一致
-    /// （官方说明里 <c>/技能 治疗 &lt;2&gt;</c> 写的是「对小队列表中的2号队员执行技能」）。
-    /// 这里不对「自己在不在列表里」做任何偏移推断 —— 那个推断是错的，
-    /// 也是「2 号在 1 号骑多人坐骑时永远不动」的根因。
+    /// <b>编号规则：自己恒为 &lt;1&gt;，其余人按 <c>IPartyList</c> 顺序依次 &lt;2&gt;、&lt;3&gt;……</b>
+    /// （用户确认：副本外队伍的第一位只会是自己，除非有特殊设置）。
     ///
-    /// 注意：真正发指令时首选的是队伍序号 <c>&lt;N&gt;</c>（见 <see cref="BuildGameCommand"/>），
-    /// 只有序号算不出来时才切目标用 <c>&lt;t&gt;</c> 兜底。这里算的序号既是主路线，
-    /// 也是排查时最有用的一条线索。
+    /// 这跟「<c>IPartyList</c> 下标 + 1」不是一回事 —— 现场实测 2 人小队里，
+    /// 自己 <c>IPartyList</c> 排第 2 位，队友落在这个位置的第 1 格，
+    /// 旧代码把它当成 <c>&lt;1&gt;</c> 发出去，而游戏的 <c>&lt;1&gt;</c> 是自己，
+    /// 于是回「1号指定的目标名不正确」。
+    ///
+    /// 主路线仍然是「切目标 + <c>&lt;t&gt;</c>」（见 <see cref="BuildGameCommand"/>），
+    /// 这个编号用于：① <c>/pr scan</c> 展示；② 用户主动关掉「切目标」时的兜底写法；
+    /// ③ 自己恒为 1 这条约束本身能挡掉「对自己发指令」。
     /// </summary>
     private PartySnapshot CollectParty()
     {
@@ -927,7 +932,9 @@ public sealed class Plugin : IDalamudPlugin
             entries.Add((name, entityId, i));
         }
 
-        // 自己在列表里排第几 —— 只用于诊断展示，不参与编号。
+        // 先认出「哪个 entry 是自己」—— 后面的编号完全取决于它。
+        int selfRawIndex = -1;
+
         foreach (var entry in entries)
         {
             var sameEntity = selfEntityId != 0 && entry.EntityId == selfEntityId;
@@ -937,22 +944,32 @@ public sealed class Plugin : IDalamudPlugin
 
             if (sameEntity || sameName)
             {
+                selfRawIndex = entry.RawIndex;
                 snapshot.ContainsSelf = true;
-                snapshot.SelfSlot = entry.RawIndex + 1;
+                snapshot.SelfRawSlot = entry.RawIndex + 1;
                 break;
             }
         }
 
-        // 序号 = 列表位置（从 1 起算）。不做任何偏移，也不跳过任何一个位置。
+        // 编号：自己恒为 1，其余人按 IPartyList 顺序依次 +1。
         //
-        // 旧版本这里是 `RawIndex + IndexOffset` 再 `slot <= 1 → continue`，
-        // 等价于假设「自己恒排第 1」。这个假设在两人队伍里就会翻车：
-        // 2 号（雷米娜大福）的客户端上列表是 [时花, 雷米娜大福]，
-        // 时花的 RawIndex = 0 → slot = 1 → 被 continue 丢掉，序号算成 0，
-        // 于是「1 号骑多人坐骑时 2 号永远不动」。跳过 1 号位置这件事本身没有依据。
+        // 认不出自己时（本地玩家还没加载好、或者 IPartyList 不含自己）退化成
+        // 「下标 + 1」—— 至少是个连续的编号，但那种情况下大概率也不该发指令。
+        var next = 2;
+
         foreach (var entry in entries)
         {
-            var slot = entry.RawIndex + 1;
+            int slot;
+
+            if (selfRawIndex >= 0 && entry.RawIndex == selfRawIndex)
+            {
+                slot = 1;
+            }
+            else
+            {
+                slot = next;
+                next++;
+            }
 
             if (!string.IsNullOrEmpty(entry.Name) && !snapshot.NameToIndex.ContainsKey(entry.Name))
             {
@@ -1054,10 +1071,12 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     /// <summary>
-    /// 查这个角色在游戏文本指令里的队伍序号（1-8）。先按 EntityId，再按名字，都没有返回 0。
+    /// 查这个角色在游戏文本指令里的队伍编号（1-8）。先按 EntityId，再按名字，都没有返回 0。
     ///
     /// 返回值 0 表示「算不出来」，调用方会改用 <c>&lt;t&gt;</c>。
-    /// 返回 1 是完全正常的 —— 那说明这个人就是小队列表的第 1 位。
+    /// 返回 1 表示「这个人就是自己」（见 <see cref="CollectParty"/> 的编号规则）——
+    /// 对自己发 <c>/共同骑乘 &lt;1&gt;</c> 只会换来一句「1号指定的目标名不正确」，
+    /// 所以调用方必须把 1 挡掉。
     /// </summary>
     private static int ResolvePartyIndex(PartySnapshot party, IGameObject obj)
     {
@@ -1084,10 +1103,15 @@ public sealed class Plugin : IDalamudPlugin
     /// 代价：<c>IPartyMember.GameObject</c> 内部会遍历对象表（官方注释写了「it should be used with care」），
     /// 所以只在真正要发指令前兜底调用一次，不进每轮轮询。
     ///
-    /// 序号算法和 <see cref="CollectParty"/> 完全一致：列表位置 + 1，不做偏移。
+    /// 编号算法和 <see cref="CollectParty"/> 完全一致：自己恒为 <c>&lt;1&gt;</c>，
+    /// 其余人按列表顺序依次 <c>&lt;2&gt;</c>、<c>&lt;3&gt;</c>……（<b>不是</b>下标 + 1，
+    /// 那样会把自己的位置算成别人的编号）。
     /// </summary>
     private int ResolvePartyIndexByGameObject(ulong gameObjectId)
     {
+        // 先拿一份权威编号表，再只负责「找出这个 GameObjectId 对应队伍里的哪一格」。
+        var party = this.CollectParty();
+
         for (var i = 0; i < this.partyList.Length; i++)
         {
             var member = this.partyList[i];
@@ -1111,15 +1135,26 @@ public sealed class Plugin : IDalamudPlugin
                 continue;
             }
 
-            return i + 1;
+            if (member.EntityId != 0 && party.EntityToIndex.TryGetValue(member.EntityId, out var byEntity))
+            {
+                return byEntity;
+            }
+
+            var name = member.Name != null ? member.Name.ToString() : null;
+            if (!string.IsNullOrEmpty(name) && party.NameToIndex.TryGetValue(name, out var byName))
+            {
+                return byName;
+            }
+
+            return 0;
         }
 
         return 0;
     }
 
     /// <summary>
-    /// 候选人的小队序号：先用快照里算好的，算不出来（0）再补两次。
-    /// 序号是主路线 —— 算得出来就发 <c>&lt;N&gt;</c>，算不出来才退到 <c>&lt;t&gt;</c> 兜底。
+    /// 候选人的队伍位置：先用快照里算好的，算不出来（0）再补两次。
+    /// 只用于展示与「关掉切目标」时的兜底写法 —— 主路线是切目标 + <c>&lt;t&gt;</c>。
     /// </summary>
     private int ResolveCandidatePartyIndex(Candidate candidate)
     {
@@ -1152,8 +1187,9 @@ public sealed class Plugin : IDalamudPlugin
     /// 游戏回一句「"&lt;t&gt;"出现问题：1号指定的目标名不正确。」—— 现场那句红字就是这么来的。
     /// 与其发出去赌一把，不如先确认；确认不了就放弃这一轮。
     ///
-    /// <b>只在序号算不出来时才调这里</b>（见 <see cref="Execute"/>）：序号是主路线，
-    /// 它能用就一次都不该动玩家的目标。
+    /// <b>这是主路径</b>（见 <see cref="Execute"/>）：<c>&lt;N&gt;</c> 编号跟游戏自己认的
+    /// 小队编号对不上（现场发 <c>&lt;1&gt;</c> 被回「1号指定的目标名不正确」），
+    /// 所以改成「切目标 + <c>&lt;t&gt;</c>」。切目标有副作用，所以只在真的要用 <c>&lt;t&gt;</c> 时切。
     ///
     /// 注意这里不还原目标：还原推迟到指令执行完之后（见 <see cref="RestoreTargetNow"/>）。
     /// </summary>
@@ -1178,7 +1214,7 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             this.log.Warning(
-                "[PillionRider] 切目标没成功（想要 {Name} goId={Want}，当前 {Now}），改用小队序号发指令",
+                "[PillionRider] 切目标没成功（想要 {Name} goId={Want}，当前 {Now}），这一轮不执行",
                 candidate.Name,
                 candidate.OwnerId,
                 now != null ? now.GameObjectId.ToString() : "无目标");
@@ -1187,7 +1223,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         catch (Exception ex)
         {
-            this.log.Warning(ex, "[PillionRider] 切目标时异常，改用小队序号发指令");
+            this.log.Warning(ex, "[PillionRider] 切目标时异常，这一轮不执行");
             return false;
         }
     }
@@ -1226,18 +1262,15 @@ public sealed class Plugin : IDalamudPlugin
     /// 参数是目标占位符加座位号 1-7，玩家手写宏就是 <c>/共同骑乘 &lt;2&gt; 1</c>。
     /// 官方支持的占位符就两种写法：
     ///   <c>&lt;t&gt;</c> / <c>&lt;target&gt;</c> —— 「当前选中的目标」
-    ///   <c>&lt;1&gt;</c>-<c>&lt;8&gt;</c>      —— 「小队列表里的第 N 位队员」
+    ///   <c>&lt;1&gt;</c>-<c>&lt;8&gt;</c>      —— 「小队列表里的第 N 位队员」（自己恒为 1）
     ///
-    /// <b>首选 &lt;N&gt;</b>：只要序号算得出来，就完全不动玩家的当前目标 ——
-    /// 切目标是有副作用的（掉目标、打断操作、被别的插件抢走），能不碰就不碰。
-    /// 序号 1 也是合法的：队伍列表第 1 位完全可能是队友（旧版当成「自己」直接丢掉，
-    /// 就是「2 号在 1 号骑多人坐骑时永远不动」的根因）。
+    /// <b>首选 &lt;t&gt;</b>：先把目标切到队友身上（切完读回来确认过），
+    /// 再用「当前目标」这种写法发指令。这条路不依赖编号语义。
     ///
-    /// <b>兜底 &lt;t&gt;</b>（序号算不出来、但切目标成功了）：
-    /// 这时才用「当前目标」这种写法，和小队编号无关。
+    /// <b>兜底 &lt;N&gt;</b>：只在用户主动关掉「切目标」时才用（<see cref="Configuration.SetTargetBeforeCommand"/>
+    /// 为 false）。编号规则是「自己恒为 &lt;1&gt;、其余人依次」，见 <see cref="CollectParty"/>。
     ///
-    /// 两条都不成立（序号 0 且没切到目标）就返回空串，让上层按「这一轮放弃」处理 ——
-    /// 宁可不发，也不要红字。
+    /// 两条都不成立就返回空串，让上层按「这一轮放弃」处理 —— 宁可不发，也不要红字。
     /// </summary>
     private string BuildGameCommand(Candidate candidate, bool useTargetPlaceholder)
     {
@@ -1251,18 +1284,22 @@ public sealed class Plugin : IDalamudPlugin
 
         string placeholder;
 
-        if (candidate.PartyIndex >= 1)
+        if (useTargetPlaceholder)
         {
-            // 序号能用就用序号，绝不依赖「当前目标」这种会被抢走的状态。
-            placeholder = "<" + candidate.PartyIndex + ">";
-        }
-        else if (useTargetPlaceholder)
-        {
-            // 序号算不出来，但目标已经切到本人身上了（切的时候读回来确认过）。
+            // 主路径：目标已经切到本人身上了（切的时候读回来确认过），<t> 必然解析到这个人。
             placeholder = "<t>";
+        }
+        else if (!Config.SetTargetBeforeCommand && candidate.PartyIndex >= 2)
+        {
+            // 用户关掉了切目标，退回编号写法。
+            //
+            // 这里要求 >= 2：编号 1 恒为自己（见 CollectParty），
+            // 对着自己发 /共同骑乘 <1> 只会换来一句「1号指定的目标名不正确」。
+            placeholder = "<" + candidate.PartyIndex + ">";
         }
         else
         {
+            // 切目标失败（对象刚好消失、被别的插件抢走）→ 这一轮不发，下一轮再试。
             return string.Empty;
         }
 
@@ -1402,23 +1439,35 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // 先把小队序号算出来。算得出来就完全不碰玩家的当前目标 ——
-        // 序号是最干净的写法：不依赖「指令执行那一刻目标还是他」，也不会被别的插件抢走。
-        //
-        // 旧版在这里踩过坑：假设「自己恒排第 1」，把真正排第 1 位的队友当自己丢掉，
-        // 序号算成 0 → 一条指令都不发；现场「2 号在 1 号骑多人坐骑时永远不动」就是这么来的。
-        // 现在序号 = 列表位置（1 起算），1 号照样发，不做任何偏移。
+        // 小队编号仍然算一遍：它是 /pr scan 里最有用的一条排查线索，
+        // 也是用户主动关掉「切目标」时唯一能用的兜底写法。
+        // 编号 1 = 自己（见 CollectParty），所以 <2 就等于「算不出一个能对别人用的编号」。
         var partyIndex = this.ResolveCandidatePartyIndex(candidate);
         candidate.PartyIndex = partyIndex;
+
+        if (partyIndex == 1)
+        {
+            this.log.Warning("[PillionRider] 算出来的编号是 <1>（那是自己），这一轮不发指令");
+            return;
+        }
 
         var previousTarget = this.targetManager.Target;
         var targetSwitched = false;
 
-        // 只有在「序号算不出来」时才退到 <t>，那时才需要切目标。
-        // 切目标是有副作用的（掉目标、打断操作），序号能用就一次都不该动。
+        // 主路径：把目标切到队友身上，然后发 <t>。
+        //
+        // 为什么主路线是 <t> 而不是 <N>：<N> 的编号规则是「自己恒为 <1>、其余人依次」，
+        // 而 IPartyList 的物理顺序不一定如此（现场 B 的 IPartyList 是 [时花, 自己]，
+        // 若按位置算就会把时花错算成 <1> = 自己）。<t> 由游戏在执行那一刻解析
+        // 「当前选中的人」，不涉及编号语义。
+        //
+        // 切目标确实有副作用（掉目标、打断操作），所以：
+        //   1) 切完立刻读回来确认真的切成了（TrySwitchTarget 里做）；
+        //   2) 指令执行完再还原（见下面 targetRestorePending 那段）；
+        //   3) 用户可以在设置里关掉这条路（SetTargetBeforeCommand=false），
+        //      那时才退回 <N> 编号写法。
         // 独立模式的 UseAction 自带 targetId，任何情况下都不需要切目标。
         if (Config.UseGameCommand &&
-            partyIndex < 1 &&
             Config.SetTargetBeforeCommand &&
             !Config.UseNativeAction)
         {
@@ -1449,7 +1498,7 @@ public sealed class Plugin : IDalamudPlugin
 
             if (string.IsNullOrEmpty(prebuiltCommand))
             {
-                this.log.Warning("[PillionRider] 拼不出有效指令（序号算不出来、目标也没切过去），本次不执行");
+                this.log.Warning("[PillionRider] 拼不出有效指令（目标没切过去，且没有可用的队伍序号兜底），本次不执行");
                 this.RestoreTargetNow();
                 return;
             }
@@ -1468,9 +1517,9 @@ public sealed class Plugin : IDalamudPlugin
 
             if (string.IsNullOrEmpty(command))
             {
-                // BuildGameCommand 只在序号算不出来（0 或 1）时返回空串，
+                // BuildGameCommand 只在「目标没切过去、又不许用序号兜底」时返回空串，
                 // 而上面已经挡过一次。真走到这里说明状态在这一瞬间又变了 —— 不发，别给游戏送红字。
-                this.log.Warning("[PillionRider] 拼不出有效指令（算不出有效小队序号），本次不执行");
+                this.log.Warning("[PillionRider] 拼不出有效指令（目标没切过去，也没有可用的队伍序号兜底），本次不执行");
                 this.RestoreTargetNow();
                 return;
             }
@@ -1705,7 +1754,7 @@ public sealed class Plugin : IDalamudPlugin
         if (Config.UseGameCommand)
         {
             this.Notify($"执行方式: 游戏指令 {Config.GameCommandFormat}（{{P}}=目标占位符 {{0}}=队友名 {{1}}=队伍序号）");
-            this.Notify("目标写法: 优先队伍序号 <N>（1-8，1 号也可能是队友）；算不出序号才切目标用 <t> 兜底");
+            this.Notify("目标写法: 优先切目标 + <t>（切完读回来确认）；关掉切目标时才退队伍序号 <N> 兜底");
             this.Notify($"聊天框通道: {ChatSender.ChannelName}　{ChatSender.StatusNote}");
             this.Notify($"错误提示拦截: {(ChatErrorSuppressor.IsInstalled ? "已启用" : "未启用")}　已拦截 {ChatErrorSuppressor.SuppressedCount} 条");
             this.Notify($"　拦截状态: {ChatErrorSuppressor.StatusNote}");
@@ -1729,12 +1778,14 @@ public sealed class Plugin : IDalamudPlugin
             this.Notify("没有从任何角色身上读到坐骑");
         }
 
-        // 队伍序号：这个是「切目标失败」时兜底发出去的 <N> 里的 N。
-        // 现场那个「2 号在 1 号骑多人坐骑时永远不动」就是旧版把 1 号位置当成自己丢掉造成的，
-        // 所以把整份列表按顺序打出来 —— 谁排第几、自己排第几，一眼可见。
+        // 队伍编号：自己恒为 <1>，其余人按 IPartyList 顺序依次 <2>、<3>……
+        // 把整份列表连原始位置一起打出来 —— 排查时能看到「IPartyList 顺序」和「游戏编号」
+        // 是两套东西，不用再猜。
         var party = this.CollectParty();
-        var selfText = party.ContainsSelf ? $"自己排第 {party.SelfSlot} 位" : "自己不在列表里";
-        this.Notify($"队伍序号: {selfText}（序号 = 列表位置，从 1 起算；1 号也可能是队友）");
+        var selfText = party.ContainsSelf
+            ? $"自己 = <1>（在 IPartyList 里排第 {party.SelfRawSlot} 位）"
+            : "自己不在 IPartyList 里（编号退化为按下标 +1）";
+        this.Notify($"队伍编号: {selfText}");
 
         for (var i = 0; i < this.partyList.Length; i++)
         {
@@ -1745,9 +1796,17 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             var memberName = member.Name != null ? member.Name.ToString() : "(无名字)";
-            var selfMark = party.ContainsSelf && i + 1 == party.SelfSlot ? "（自己）" : string.Empty;
 
-            this.Notify($"队伍列表[{i}] = <{i + 1}> {memberName}{selfMark} EntityId={member.EntityId}");
+            var gameSlot = 0;
+            if (!string.IsNullOrEmpty(memberName))
+            {
+                party.NameToIndex.TryGetValue(memberName, out gameSlot);
+            }
+
+            var slotText = gameSlot >= 1 ? $"<{gameSlot}>" : "<?>";
+            var selfMark = party.ContainsSelf && i + 1 == party.SelfRawSlot ? "（自己）" : string.Empty;
+
+            this.Notify($"队伍列表[{i}] = {slotText} {memberName}{selfMark} EntityId={member.EntityId}");
         }
 
         var playerIndex = 0;
