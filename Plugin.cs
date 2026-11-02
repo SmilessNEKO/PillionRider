@@ -165,8 +165,11 @@ public sealed class Plugin : IDalamudPlugin
 
     public string MountDataFailureReason => MountData.FailureReason ?? string.Empty;
 
-    /// <summary>聊天框通道（ECommons）当前状态，给设置窗口显示。</summary>
+    /// <summary>聊天框通道当前状态，给设置窗口显示。</summary>
     public string ChatChannelStatus => ChatSender.StatusNote;
+
+    /// <summary>当前实际走的哪条路（原生 / ECommons 备用 / 无）。</summary>
+    public string ChatChannelName => ChatSender.ChannelName;
 
     /// <summary>聊天框通道能不能用。不能用时游戏原生指令送不进去，只能退化到 ProcessCommand。</summary>
     public bool ChatChannelAvailable => ChatSender.IsAvailable;
@@ -246,8 +249,10 @@ public sealed class Plugin : IDalamudPlugin
         ChatErrorSuppressor.Install(chatGui, this.log);
 
         // 提前探一次聊天框通道，让日志里直接有结论（用户排查时不用先敲 /pr scan）。
-        // 注意先读一次 IsAvailable 触发探测，否则 StatusNote 还停在「尚未探测」。
-        this.log.Information("[PillionRider] 聊天框通道可用={Available}：{Note}", ChatSender.IsAvailable, ChatSender.StatusNote);
+        // 原生 ProcessChatBoxEntry 优先，拿不到再退 ECommons。
+        ChatSender.RefreshStatus(this.log);
+        this.log.Information("[PillionRider] 聊天框通道可用={Available}（{Channel}）：{Note}",
+            ChatSender.IsAvailable, ChatSender.ChannelName, ChatSender.StatusNote);
 
         this.log.Information(
             "[PillionRider] 已加载，执行方式={Mode}，{Detail}",
@@ -884,8 +889,9 @@ public sealed class Plugin : IDalamudPlugin
     /// 这里不对「自己在不在列表里」做任何偏移推断 —— 那个推断是错的，
     /// 也是「2 号在 1 号骑多人坐骑时永远不动」的根因。
     ///
-    /// 注意：真正发指令时首选的是 <c>&lt;t&gt;</c>（见 <see cref="BuildGameCommand"/>），
-    /// 序号只是「切目标失败」时的兜底和排查用。
+    /// 注意：真正发指令时首选的是队伍序号 <c>&lt;N&gt;</c>（见 <see cref="BuildGameCommand"/>），
+    /// 只有序号算不出来时才切目标用 <c>&lt;t&gt;</c> 兜底。这里算的序号既是主路线，
+    /// 也是排查时最有用的一条线索。
     /// </summary>
     private PartySnapshot CollectParty()
     {
@@ -1113,7 +1119,7 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary>
     /// 候选人的小队序号：先用快照里算好的，算不出来（0）再补两次。
-    /// 序号只是 <c>&lt;t&gt;</c> 切不到目标时的兜底，拿到多少都不影响主路线。
+    /// 序号是主路线 —— 算得出来就发 <c>&lt;N&gt;</c>，算不出来才退到 <c>&lt;t&gt;</c> 兜底。
     /// </summary>
     private int ResolveCandidatePartyIndex(Candidate candidate)
     {
@@ -1144,7 +1150,10 @@ public sealed class Plugin : IDalamudPlugin
     /// 为什么要读回来：<c>&lt;t&gt;</c> 是游戏在「执行指令那一刻」解析的。
     /// 目标没切成功（对象刚好消失、被别的插件抢走）时它会解析失败，
     /// 游戏回一句「"&lt;t&gt;"出现问题：1号指定的目标名不正确。」—— 现场那句红字就是这么来的。
-    /// 与其发出去赌一把，不如先确认；确认不了就改用小队序号发。
+    /// 与其发出去赌一把，不如先确认；确认不了就放弃这一轮。
+    ///
+    /// <b>只在序号算不出来时才调这里</b>（见 <see cref="Execute"/>）：序号是主路线，
+    /// 它能用就一次都不该动玩家的目标。
     ///
     /// 注意这里不还原目标：还原推迟到指令执行完之后（见 <see cref="RestoreTargetNow"/>）。
     /// </summary>
@@ -1219,14 +1228,16 @@ public sealed class Plugin : IDalamudPlugin
     ///   <c>&lt;t&gt;</c> / <c>&lt;target&gt;</c> —— 「当前选中的目标」
     ///   <c>&lt;1&gt;</c>-<c>&lt;8&gt;</c>      —— 「小队列表里的第 N 位队员」
     ///
-    /// <b>首选 &lt;t&gt;</b>（<paramref name="useTargetPlaceholder"/> 为 true 时）：
-    /// 只要发指令前把目标切到那个队友、并且切成功（切目标时会读回来确认），
-    /// 它就必然指向对的人，和小队编号完全无关 —— 不会再有「编号算错、发错人、干脆不发」这种事。
+    /// <b>首选 &lt;N&gt;</b>：只要序号算得出来，就完全不动玩家的当前目标 ——
+    /// 切目标是有副作用的（掉目标、打断操作、被别的插件抢走），能不碰就不碰。
+    /// 序号 1 也是合法的：队伍列表第 1 位完全可能是队友（旧版当成「自己」直接丢掉，
+    /// 就是「2 号在 1 号骑多人坐骑时永远不动」的根因）。
     ///
-    /// <b>兜底 &lt;N&gt;</b>：切不过去时用小队列表位置找人。
-    /// 这里<b>不再把 1 号位置当成「自己」而拒绝</b> —— 那个假设是错的，位置 1 完全可能是队友
-    /// （正是「2 号在 1 号骑多人坐骑时永远不动」的根因）。
-    /// 只有序号是 0（压根算不出来）才返回空串，让上层按「这一轮放弃」处理 —— 宁可不发，也不要红字。
+    /// <b>兜底 &lt;t&gt;</b>（序号算不出来、但切目标成功了）：
+    /// 这时才用「当前目标」这种写法，和小队编号无关。
+    ///
+    /// 两条都不成立（序号 0 且没切到目标）就返回空串，让上层按「这一轮放弃」处理 ——
+    /// 宁可不发，也不要红字。
     /// </summary>
     private string BuildGameCommand(Candidate candidate, bool useTargetPlaceholder)
     {
@@ -1240,20 +1251,19 @@ public sealed class Plugin : IDalamudPlugin
 
         string placeholder;
 
-        if (useTargetPlaceholder)
+        if (candidate.PartyIndex >= 1)
         {
-            // 目标已经切到本人身上了，用「当前目标」这种写法最稳：和小队编号无关。
+            // 序号能用就用序号，绝不依赖「当前目标」这种会被抢走的状态。
+            placeholder = "<" + candidate.PartyIndex + ">";
+        }
+        else if (useTargetPlaceholder)
+        {
+            // 序号算不出来，但目标已经切到本人身上了（切的时候读回来确认过）。
             placeholder = "<t>";
         }
         else
         {
-            // 序号 1 也算有效：列表第 1 位完全可能是队友（旧版当成「自己」直接丢掉，就是那个 bug）。
-            if (candidate.PartyIndex < 1)
-            {
-                return string.Empty;
-            }
-
-            placeholder = "<" + candidate.PartyIndex + ">";
+            return string.Empty;
         }
 
         var index = candidate.PartyIndex >= 1 ? candidate.PartyIndex.ToString() : "?";
@@ -1392,22 +1402,23 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        // 先定下「目标怎么写」，再拼指令 —— 因为拼出来的占位符取决于切目标成没成。
+        // 先把小队序号算出来。算得出来就完全不碰玩家的当前目标 ——
+        // 序号是最干净的写法：不依赖「指令执行那一刻目标还是他」，也不会被别的插件抢走。
         //
-        // 首选 <t>：它只依赖「当前目标是谁」，和小队编号完全无关。
-        // 编号那套踩过坑（旧版假设「自己恒排第 1」，把真正排第 1 位的队友当自己丢掉，
-        // 序号算成 0 → 一条指令都不发；现场「2 号在 1 号骑多人坐骑时永远不动」就是这么来的），
-        // 所以能用 <t> 就不用编号。
+        // 旧版在这里踩过坑：假设「自己恒排第 1」，把真正排第 1 位的队友当自己丢掉，
+        // 序号算成 0 → 一条指令都不发；现场「2 号在 1 号骑多人坐骑时永远不动」就是这么来的。
+        // 现在序号 = 列表位置（1 起算），1 号照样发，不做任何偏移。
         var partyIndex = this.ResolveCandidatePartyIndex(candidate);
         candidate.PartyIndex = partyIndex;
 
         var previousTarget = this.targetManager.Target;
         var targetSwitched = false;
 
-        // 游戏指令是按目标占位符找人的，所以要先切目标；
-        // 独立模式的 UseAction 自带 targetId，切目标是多余动作 ——
-        // 而且真的会掉目标、打断某些操作，属于纯副作用。
+        // 只有在「序号算不出来」时才退到 <t>，那时才需要切目标。
+        // 切目标是有副作用的（掉目标、打断操作），序号能用就一次都不该动。
+        // 独立模式的 UseAction 自带 targetId，任何情况下都不需要切目标。
         if (Config.UseGameCommand &&
+            partyIndex < 1 &&
             Config.SetTargetBeforeCommand &&
             !Config.UseNativeAction)
         {
@@ -1419,7 +1430,7 @@ public sealed class Plugin : IDalamudPlugin
             // 目标要等指令真的执行完才能还原。
             //
             // 这里不能发完立刻还原：<t> 是游戏在「执行指令那一刻」解析的，
-            // 而 ECommons 是把指令排队敲进聊天框的，可能排到后面的帧才执行。
+            // 而指令是排队敲进聊天框的，可能排到后面的帧才执行。
             // 早先「发完马上还原目标」的写法会让 <t> 解析成已经换回去的那个目标/空目标，
             // 游戏就回「"<t>"出现问题：1号指定的目标名不正确。」—— 现场那句红字的真正成因。
             // 改成推迟到 0.7 秒后的验证那一步还原（VerifyLastAction / RestoreTargetNow）。
@@ -1428,7 +1439,7 @@ public sealed class Plugin : IDalamudPlugin
             this.targetRestoreAtTick = Environment.TickCount64 + 3000;
         }
 
-        // 提前把指令拼出来：拼不出来（既切不到目标、又没有效序号）就趁还没发消息之前退出，
+        // 提前把指令拼出来：拼不出来（既没有效序号、又没切到目标）就趁还没发消息之前退出，
         // 免得白掉一次目标、多打一条日志。
         string prebuiltCommand = null;
 
@@ -1438,7 +1449,7 @@ public sealed class Plugin : IDalamudPlugin
 
             if (string.IsNullOrEmpty(prebuiltCommand))
             {
-                this.log.Warning("[PillionRider] 拼不出有效指令（既没切到目标、也没有效小队序号），本次不执行");
+                this.log.Warning("[PillionRider] 拼不出有效指令（序号算不出来、目标也没切过去），本次不执行");
                 this.RestoreTargetNow();
                 return;
             }
@@ -1451,15 +1462,15 @@ public sealed class Plugin : IDalamudPlugin
         {
             // 主力路线：发游戏自带的 /共同骑乘 指令。
             // 这条指令游戏官方就有（玩家手动写宏用的就是它），不需要猜 GeneralAction ID，
-            // 只借 ECommons 把这条指令敲进聊天框，
+            // 自己调 UIModule.ProcessChatBoxEntry 把它敲进聊天框（零第三方依赖），
             // 而且猜 ID 猜错会打开分解窗口（GeneralAction 5）。
             var command = prebuiltCommand ?? BuildGameCommand(candidate, targetSwitched);
 
             if (string.IsNullOrEmpty(command))
             {
-                // BuildGameCommand 只在「既切不到目标、又没有效序号」时返回空串，
+                // BuildGameCommand 只在序号算不出来（0 或 1）时返回空串，
                 // 而上面已经挡过一次。真走到这里说明状态在这一瞬间又变了 —— 不发，别给游戏送红字。
-                this.log.Warning("[PillionRider] 拼不出有效指令（既没切到目标、也没有效小队序号），本次不执行");
+                this.log.Warning("[PillionRider] 拼不出有效指令（算不出有效小队序号），本次不执行");
                 this.RestoreTargetNow();
                 return;
             }
@@ -1474,8 +1485,9 @@ public sealed class Plugin : IDalamudPlugin
             // 关键：这里必须走「模拟聊天框输入」，不能走 ICommandManager.ProcessCommand。
             // ProcessCommand 只查 Dalamud 自己注册过的指令表，/共同骑乘 是游戏原生指令，
             // 它查不到就直接返回 false，游戏那边一个字都没收到 —— 表现就是聊天框一路
-            // 打印「已发送游戏指令」而角色纹丝不动。ChatSender 走 ECommons 的
-            // Chat.ExecuteCommand，那个才是真的「当作你敲进了聊天框」。
+            // 打印「已发送游戏指令」而角色纹丝不动。
+            // ChatSender 主路径直调 UIModule.ProcessChatBoxEntry（就是 ECommons
+            // Chat.ExecuteCommand 内部干的那件事），备用路径才反射 ECommons。
             var sent = ChatSender.TrySend(command, this.log, out var sendError);
 
             if (sent)
@@ -1485,7 +1497,7 @@ public sealed class Plugin : IDalamudPlugin
             }
             else
             {
-                // ECommons 不在（或者接口对不上）时的退路：仍然试一下 ProcessCommand。
+                // 两条聊天通道都不通时的退路：仍然试一下 ProcessCommand。
                 // 有些版本/环境下 Dalamud 会把未知指令转交出去，能成就是白捡；
                 // 成不了也有上面的日志留证据，不会静默失败。
                 var dispatched = this.commandManager.ProcessCommand(command);
@@ -1693,8 +1705,8 @@ public sealed class Plugin : IDalamudPlugin
         if (Config.UseGameCommand)
         {
             this.Notify($"执行方式: 游戏指令 {Config.GameCommandFormat}（{{P}}=目标占位符 {{0}}=队友名 {{1}}=队伍序号）");
-            this.Notify("目标写法: 优先切目标后用 <t>；切不到目标才用小队序号 <N>（也就是 {1} 展开的那个数字）");
-            this.Notify($"聊天框通道: {ChatSender.StatusNote}");
+            this.Notify("目标写法: 优先队伍序号 <N>（1-8，1 号也可能是队友）；算不出序号才切目标用 <t> 兜底");
+            this.Notify($"聊天框通道: {ChatSender.ChannelName}　{ChatSender.StatusNote}");
             this.Notify($"错误提示拦截: {(ChatErrorSuppressor.IsInstalled ? "已启用" : "未启用")}　已拦截 {ChatErrorSuppressor.SuppressedCount} 条");
             this.Notify($"　拦截状态: {ChatErrorSuppressor.StatusNote}");
         }
@@ -1876,10 +1888,11 @@ public sealed class Plugin : IDalamudPlugin
                 break;
 
             case "chat":
-                // 排查用：聊天框通道（ECommons）到底在不在。
+                // 排查用：聊天框通道到底在不在、走的哪条路。
                 // 插件加载顺序不确定，ECommons 可能晚于我们加载，所以这里顺手重置再探一次。
                 ChatSender.Reset();
-                this.Notify($"聊天框通道: {(ChatSender.IsAvailable ? "可用" : "不可用")}　{ChatSender.StatusNote}");
+                ChatSender.RefreshStatus(this.log);
+                this.Notify($"聊天框通道: {(ChatSender.IsAvailable ? "可用" : "不可用")}　通道={ChatSender.ChannelName}　{ChatSender.StatusNote}");
                 break;
 
             case "chatevents":

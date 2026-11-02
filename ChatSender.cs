@@ -19,22 +19,28 @@ namespace PillionRider;
 /// </para>
 ///
 /// <para>
-/// <b>为什么要借 ECommons</b>：模拟聊天框输入要拿到游戏的
-/// <c>UIModule.ProcessChatBoxEntry</c>，那是个没有导出符号的内部函数，
-/// 必须靠特征码扫描定位 —— 属于 FFXIVClientStructs 那层的手艺。
-/// ECommons 里的 <c>ECommons.Automation.Chat.ExecuteCommand(string)</c>
-/// 干的正是这件事，文档原文是
-/// 「Executes command as if it was typed in chat box.」。
-/// ECommons 是社区事实标准库，机器上装了 AutoDuty / Questionable / Lifestream /
-/// SomethingNeedDoing / Artisan / BOCCHI 这类插件就一定有它（实测本机 19 份）。
+/// <b>主路径：直接调游戏的 <c>UIModule.ProcessChatBoxEntry</c></b>。
+/// 那是「把一行文字当成玩家在聊天框敲的内容处理」的内部函数，没有导出符号，
+/// 靠 FFXIVClientStructs 的特征码扫描定位。国服 Dalamud 15 自带的
+/// <c>FFXIVClientStructs.dll</c> 已经解出签名：
+/// <code>void ProcessChatBoxEntry(Utf8String* text, IntPtr a2, bool a3);</code>
+/// 这条路零第三方依赖，详见 <see cref="NativeChatSender"/>。
 /// </para>
 ///
 /// <para>
-/// <b>为什么用反射而不是直接引用 ECommons.dll</b>：ECommons 是跟着各个插件
-/// 各自带一份的第三方库，不同插件带的版本不一样（本机同时存在 19 份，
-/// 版本还各不相同）。编译期硬引用哪一份都是赌博：用户在游戏里实际加载的可能是
-/// 另一份、版本不同、甚至签名改了。反射调用只要「类型和这个签名的方法在」就能用，
-/// 找不到就退化到 ProcessCommand 并明确告诉用户缺什么，不会连累整个插件编译/加载。
+/// <b>备用路径：借 ECommons</b>。万一某个 Dalamud 版本的 FFXIVClientStructs
+/// 没有这个函数（或签名变了），就退回反射调用
+/// <c>ECommons.Automation.Chat.ExecuteCommand(string)</c> —— 它内部干的是同一件事。
+/// ECommons 是社区事实标准库，机器上装了 AutoDuty / Questionable / Lifestream /
+/// SomethingNeedDoing / Artisan / BOCCHI 这类插件就一定有它（实测本机 19 份，
+/// 版本从 2.0.0.39 到 3.2.1.26 各不相同，所以只能反射不能硬引用）。
+/// </para>
+///
+/// <para>
+/// <b>为什么备用路径用反射而不是直接引用 ECommons.dll</b>：ECommons 是跟着各个插件
+/// 各自带一份的第三方库，版本各不相同。编译期硬引用哪一份都是赌博：用户在游戏里
+/// 实际加载的可能是另一份、版本不同、甚至签名改了。反射调用只要「类型和这个签名的
+/// 方法在」就能用，找不到就明确告诉用户缺什么，不会连累整个插件编译/加载。
 /// </para>
 /// </summary>
 internal static class ChatSender
@@ -56,19 +62,47 @@ internal static class ChatSender
     /// <summary>给 /pr scan 与设置窗口显示的状态说明。</summary>
     public static string StatusNote { get; private set; } = "尚未探测";
 
-    /// <summary>ECommons 通道是否已经就绪。</summary>
+    /// <summary>聊天框通道是否可用（原生优先，其次 ECommons）。</summary>
     public static bool IsAvailable
     {
         get
         {
+#if NATIVE_ACTION
+            if (NativeChatSender.IsAvailable)
+            {
+                return true;
+            }
+#endif
             Probe(null);
             return executeCommandMethod != null;
+        }
+    }
+
+    /// <summary>当前实际走的是哪条路，给 /pr scan 显示。</summary>
+    public static string ChannelName
+    {
+        get
+        {
+#if NATIVE_ACTION
+            if (NativeChatSender.IsAvailable)
+            {
+                return "原生（ProcessChatBoxEntry）";
+            }
+#endif
+            Probe(null);
+            return executeCommandMethod != null ? "ECommons（反射）" : "无";
         }
     }
 
     /// <summary>
     /// 真正把一行指令送进游戏聊天框。<paramref name="command"/> 必须以 <c>/</c> 开头。
     /// 成功返回 true；失败时 <paramref name="error"/> 说明原因。
+    ///
+    /// <para>
+    /// 优先走原生 <c>ProcessChatBoxEntry</c>，拿不到再退 ECommons。
+    /// 输入校验在这里统一做 —— 以前是 ECommons 帮我们挡的，现在主路径自己发，
+    /// 必须自己挡：空串、超长、换行/回车/NUL 都会让游戏把一行截断或直接忽略。
+    /// </para>
     /// </summary>
     public static bool TrySend(string command, IPluginLog log, out string error)
     {
@@ -82,17 +116,52 @@ internal static class ChatSender
 
         command = command.Trim();
 
-        // ECommons 的 ExecuteCommand 对没带斜杠的文本会抛 ArgumentException，这里先兜住。
+        // 没带斜杠的文本，游戏会当成聊天内容发出去而不是执行指令。
         if (!command.StartsWith("/", StringComparison.Ordinal))
         {
             command = "/" + command;
         }
 
+        // 换行/回车/NUL 会把一行切成两半，后半段可能变成一条真的聊天消息发到频道里。
+        if (command.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0)
+        {
+            error = "指令里含换行或 NUL，拒绝发送";
+            return false;
+        }
+
+        var byteCount = System.Text.Encoding.UTF8.GetByteCount(command);
+
+#if NATIVE_ACTION
+        if (byteCount > NativeChatSender.MaxUtf8Bytes)
+        {
+            error = $"指令太长（{byteCount} 字节，上限 {NativeChatSender.MaxUtf8Bytes}）";
+            return false;
+        }
+
+        if (NativeChatSender.IsAvailable)
+        {
+            if (NativeChatSender.TrySend(command, log, out var nativeError))
+            {
+                return true;
+            }
+
+            // 原生失败不直接判死：可能是这一版签名对不上，退到 ECommons 再试一次。
+            log?.Warning("[PillionRider] 原生通道发送失败（{Reason}），改用 ECommons 重试", nativeError);
+            error = nativeError;
+        }
+#else
+        if (byteCount > 500)
+        {
+            error = $"指令太长（{byteCount} 字节，上限 500）";
+            return false;
+        }
+#endif
+
         Probe(log);
 
         if (executeCommandMethod == null)
         {
-            error = "没有可用的聊天框通道（ECommons 未加载）：游戏原生指令没法送进游戏";
+            error ??= "没有可用的聊天框通道：原生 ProcessChatBoxEntry 不可用，机器上也没有 ECommons";
             return false;
         }
 
@@ -213,14 +282,41 @@ internal static class ChatSender
         if (executeCommandMethod != null)
         {
             var isStatic = executeCommandMethod.IsStatic;
-            StatusNote = $"ECommons 通道就绪（{assemblyName}!{chatType.FullName}.{MethodName}{(isStatic ? "" : "，实例方法")}）";
+            StatusNote = $"ECommons 备用通道就绪（{assemblyName}!{chatType.FullName}.{MethodName}{(isStatic ? "" : "，实例方法")}）";
             log?.Information("[PillionRider] {Note}", StatusNote);
             return;
         }
 
         StatusNote = foundChatTypes.Count > 0
             ? $"找到 ECommons 但接口不匹配：{string.Join(" / ", foundChatTypes)}"
-            : "没找到 ECommons（需要装一个带 ECommons 的插件，比如 AutoDuty / Questionable / Lifestream / Artisan）";
+            : "没找到 ECommons（备用通道也不可用）";
+    }
+
+    /// <summary>
+    /// 刷新 <see cref="StatusNote"/>，让它反映当前实际会走哪条路。
+    /// 插件启动时与 <c>/pr scan</c> 里都调一次。
+    /// </summary>
+    public static void RefreshStatus(IPluginLog log)
+    {
+#if NATIVE_ACTION
+        if (NativeChatSender.IsAvailable)
+        {
+            StatusNote = NativeChatSender.StatusNote;
+            log?.Information("[PillionRider] 聊天框通道：{Note}", StatusNote);
+            return;
+        }
+#endif
+        Probe(log);
+#if NATIVE_ACTION
+        if (executeCommandMethod != null)
+        {
+            StatusNote = "原生通道不可用，已退回 " + StatusNote;
+        }
+        else
+        {
+            StatusNote = NativeChatSender.StatusNote + "；" + StatusNote;
+        }
+#endif
     }
 
     private static void CollectChatTypes(Assembly assembly)

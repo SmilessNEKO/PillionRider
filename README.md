@@ -4,7 +4,9 @@
 
 ## 前置条件
 
-需要机器上已加载 **ECommons**。多数常用插件自带（AutoDuty / Questionable / Lifestream / Artisan / SomethingNeedDoing / BOCCHI 等任选其一即可），装过其中任意一个就不用额外做什么。
+无。装好就能用，不需要任何其它插件。
+
+（插件通过游戏自己的聊天框入口发送指令，走的是 Dalamud 自带的 `FFXIVClientStructs`，不依赖第三方库。）
 
 ## 安装
 

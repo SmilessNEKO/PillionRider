@@ -60,19 +60,20 @@ public sealed class ConfigWindow : Window
         if (config.UseGameCommand)
         {
             ImGui.Text(U8($"模板: {config.GameCommandFormat}"));
-            ImGui.Text(U8("  {P} = 目标写法（默认展开成 <t>，就是「当前选中的目标」）"));
+            ImGui.Text(U8("  {P} = 目标写法（优先 <N> 队伍序号，算不出序号才退 <t>）"));
             ImGui.Text(U8("  {0} = 队友名，{1} = 小队序号（队伍列表位置，从 1 起算）"));
             ImGui.Text(U8("  国际服写 /ridepillion {P}"));
-            ImGui.Text(U8("  模板不用改：<t> 是游戏官方支持的写法，切目标成功就必然指向对的人"));
-            ImGui.Text(U8("  切不到目标时才退回序号 <N>，两条路都不通就这一轮不动"));
-            ImGui.Text(U8($"聊天框通道: {this.plugin.ChatChannelStatus}"));
+            ImGui.Text(U8("  小队序号 1 号也可能是队友：不再假设「1 号恒为自己」"));
+            ImGui.Text(U8("  序号也就算不出来才这一轮不动，绝不瞎猜目标"));
+            ImGui.Text(U8($"聊天框通道: {this.plugin.ChatChannelName}"));
+            ImGui.Text(U8($"  {this.plugin.ChatChannelStatus}"));
 
             // 这条不是吓唬人：ProcessCommand 发不出游戏原生指令，实测就是这么失败的。
-            // 没有 ECommons 就没有「模拟打字」的能力，游戏那边收不到任何东西。
+            // 原生 ProcessChatBoxEntry 拿不到、机器上也没有 ECommons 时，游戏那边收不到任何东西。
             if (!this.plugin.ChatChannelAvailable)
             {
-                ImGui.Text(U8("  没有 ECommons 时指令送不进游戏 —— 装一个带 ECommons 的插件即可"));
-                ImGui.Text(U8("  （AutoDuty / Questionable / Lifestream / Artisan / SomethingNeedDoing 任选其一）"));
+                ImGui.Text(U8("  聊天框通道不可用，指令送不进游戏"));
+                ImGui.Text(U8("  正常情况下不会出现：这条通道由 Dalamud 自带的 FFXIVClientStructs 提供"));
             }
         }
 
@@ -145,14 +146,13 @@ public sealed class ConfigWindow : Window
         ImGui.Text(U8("  单人时插件完全休眠：不扫对象表、不读 Excel 表、不做任何判断"));
         ImGui.Text(U8("  跨服小队（跨服组队 / 跨服团队）同样完全休眠：队友实体不在本地对象表里"));
         ImGui.Text(U8("  刚下坐骑后静默 1.5 秒：那一瞬间状态还在收尾，判断最容易踩空"));
-        ImGui.Text(U8("  目标写法优先用 <t>：先把当前目标切到该队友并读回来确认，切不到才退回小队序号 <N>"));
-        ImGui.Text(U8("  小队序号 = 队伍列表位置（从 1 起算），1 号也可能是队友 —— 不再假设 1 号是自己"));
-        ImGui.Text(U8("  既切不到目标、又算不出序号才不发：宁可这一轮不动，也不给游戏送红字"));
+        ImGui.Text(U8("  目标写法：优先队伍序号 <N>（1-8，1 号也可能是队友），序号算不出来才切目标用 <t> 兜底"));
+        ImGui.Text(U8("  序号能用就绝不碰你的当前目标；两条都不成立才不发：宁可这一轮不动，也不给游戏送红字"));
         ImGui.Text(U8("  指令发出后 2 秒内，聊天框里带「出现问题」的错误提示会被自动吞掉"));
-        ImGui.Text(U8("  目标要等指令执行完才还原（约 0.7 秒）：发完立刻还原会让 <t> 解析失败，反而送红字"));
+        ImGui.Text(U8("  万一走了 <t> 兜底：目标要等指令执行完才还原（约 0.7 秒），发完立刻还原会让 <t> 解析失败"));
 
         var setTarget = config.SetTargetBeforeCommand;
-        if (ImGui.Checkbox(U8("触发前把目标切到该队友"), ref setTarget))
+        if (ImGui.Checkbox(U8("序号算不出来时，把目标切到该队友（用 <t> 兜底）"), ref setTarget))
         {
             config.SetTargetBeforeCommand = setTarget;
             config.Save();
@@ -164,7 +164,7 @@ public sealed class ConfigWindow : Window
         }
         else
         {
-            ImGui.Text(U8("(建议保持勾选：勾上才能用 <t>，切目标成功就完全不依赖队伍编号)"));
+            ImGui.Text(U8("(默认勾选：只在序号算不出来时才会真的去切，平时一次都不碰你的目标)"));
         }
 
         var restore = config.RestoreTargetAfter;
@@ -265,7 +265,7 @@ public sealed class ConfigWindow : Window
         ImGui.Text(U8("/pr now          强制触发一次"));
         ImGui.Text(U8("/pr scan         输出队伍扫描结果"));
         ImGui.Text(U8("/pr kinds        输出对象类型统计（排查用）"));
-        ImGui.Text(U8("/pr chat         检查聊天框通道（ECommons）是否可用"));
+        ImGui.Text(U8("/pr chat         检查聊天框通道（原生 / ECommons 备用）是否可用"));
         ImGui.Text(U8("/pr chatevents   列出本版本聊天框接口的事件/属性（排查错误提示拦截用）"));
         ImGui.Text(U8("/pr quiet        切换「不向聊天框发送自动提示」"));
         ImGui.Text(U8("/pr mountinfo <id>  查某个坐骑 ID 的 ExtraSeats（胖莫古力是 84）"));

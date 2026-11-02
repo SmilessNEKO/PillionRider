@@ -2,9 +2,9 @@
   "Author": "Neko",
   "Name": "PillionRider",
   "Punchline": "脱战后自动骑上队友的多人坐骑",
-  "Description": "脱战状态下检测队伍里是否有队友正骑着多人（共同）坐骑，若有则自动骑上去。直接发送游戏自带的「/共同骑乘」（国际服 /ridepillion）指令；发送需要机器上已加载 ECommons（多数常用插件自带，如 AutoDuty / Questionable / Lifestream / Artisan）。右上角状态栏显示「PillionRider: on / off」，点一下即可启停。只有有队伍、且是同服小队时才工作：单人、跨服组队、跨服团队、副本内、战斗中一律完全休眠。支持距离限制、冷却、每次上坐骑只触发一次、失败重试与退避、700ms 延迟验证。",
+  "Description": "脱战状态下检测队伍里是否有队友正骑着多人（共同）坐骑，若有则自动骑上去。直接发送游戏自带的「/共同骑乘」（国际服 /ridepillion）指令，走游戏自己的聊天框入口，不需要安装任何其它插件。右上角状态栏显示「PillionRider: on / off」，点一下即可启停。只有有队伍、且是同服小队时才工作：单人、跨服组队、跨服团队、副本内、战斗中一律完全休眠。支持距离限制、冷却、每次上坐骑只触发一次、失败重试与退避、700ms 延迟验证。",
   "InternalName": "PillionRider",
-  "AssemblyVersion": "1.0.0.0",
+  "AssemblyVersion": "1.1.0.0",
   "RepoUrl": "https://github.com/SmilessNEKO/PillionRider",
   "ApplicableVersion": "any",
   "Tags": [

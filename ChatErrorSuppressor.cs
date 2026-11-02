@@ -16,7 +16,8 @@ namespace PillionRider;
 /// （<c>/macroerror</c>，别名 <c>/merror</c>）的官方说明写得很清楚 ——
 /// 「Display or hide text command errors <b>within a user macro</b>.」
 /// 也就是它<b>只管宏里</b>的错误。插件是把指令当普通聊天文本发出去的
-/// （走 ECommons 的 <c>Chat.ExecuteCommand</c>），不在宏上下文里，这条开关对它无效。
+/// （走 <c>UIModule.ProcessChatBoxEntry</c>，见 <see cref="NativeChatSender"/>），
+/// 不在宏上下文里，这条开关对它无效。
 /// 而且国服指令名是本地化的，硬发 <c>/merror</c> 反而可能变成另一条「指令不存在」的红字。</para>
 ///
 /// <para><b>这里的做法</b>：订阅 Dalamud 的 <c>IChatGui.CheckMessageHandled</c> 事件，

@@ -3,9 +3,9 @@
     "Author": "Neko",
     "Name": "PillionRider",
     "Punchline": "脱战后自动骑上队友的多人坐骑",
-    "Description": "脱战状态下检测队伍里是否有队友正骑着多人（共同）坐骑，若有则自动骑上去。直接发送游戏自带的「/共同骑乘」（国际服 /ridepillion）指令；发送需要机器上已加载 ECommons（多数常用插件自带，如 AutoDuty / Questionable / Lifestream / Artisan）。右上角状态栏显示「PillionRider: on / off」，点一下即可启停。只有有队伍、且是同服小队时才工作：单人、跨服组队、跨服团队、副本内、战斗中一律完全休眠。支持距离限制、冷却、每次上坐骑只触发一次、失败重试与退避、700ms 延迟验证。",
+    "Description": "脱战状态下检测队伍里是否有队友正骑着多人（共同）坐骑，若有则自动骑上去。直接发送游戏自带的「/共同骑乘」（国际服 /ridepillion）指令，走游戏自己的聊天框入口，不需要安装任何其它插件。右上角状态栏显示「PillionRider: on / off」，点一下即可启停。只有有队伍、且是同服小队时才工作：单人、跨服组队、跨服团队、副本内、战斗中一律完全休眠。支持距离限制、冷却、每次上坐骑只触发一次、失败重试与退避、700ms 延迟验证。",
     "InternalName": "PillionRider",
-    "AssemblyVersion": "1.0.0",
+    "AssemblyVersion": "1.1.0",
     "RepoUrl": "https://github.com/SmilessNEKO/PillionRider",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 15,
@@ -28,6 +28,6 @@
     "DownloadLinkInstall": "https://github.com/SmilessNEKO/PillionRider/releases/latest/download/latest.zip",
     "DownloadLinkUpdate": "https://github.com/SmilessNEKO/PillionRider/releases/latest/download/latest.zip",
     "DownloadLinkTesting": "https://github.com/SmilessNEKO/PillionRider/releases/latest/download/latest.zip",
-    "Changelog": "1.0.0：首个公开版本。脱战后自动骑上队友的多人坐骑；只用队伍序号占位符 <2>-<8> 发「/共同乘骑」（切目标后读回来确认），算不出序号就不发；下坐骑后静默 1.5 秒，指令发出后 2 秒内自动吞掉错误提示。"
+    "Changelog": "1.1.0：不再需要任何第三方插件 —— 指令改为直接调游戏自己的聊天框入口（UIModule.ProcessChatBoxEntry），装好即用。目标写法改为序号优先：优先发队伍序号 <N>（1-8，1 号也可能是队友），序号算不出来才切目标用 <t> 兜底，平时一次都不碰你的当前目标。下坐骑后静默 1.5 秒，指令发出后 2 秒内自动吞掉错误提示。"
   }
 ]
