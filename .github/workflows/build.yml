@@ -66,7 +66,22 @@ jobs:
         shell: pwsh
         run: |
           $v = '${{ steps.ver.outputs.version }}'
-          $repo = (Get-Content pluginmaster.json -Raw | ConvertFrom-Json)[0]
+          $raw = Get-Content pluginmaster.json -Raw
+          $parsed = $raw | ConvertFrom-Json
+
+          # 插件库清单必须是「数组」，哪怕只有一个插件。
+          # 写成单个对象时 Dalamud 反序列化成 List<RemotePluginManifest> 会直接抛异常，
+          # 用户在 /xlsettings 里只会看到一句「下载失败」，两个地址都一样 —— 排查起来极其费劲。
+          if ($parsed -isnot [System.Array]) {
+            Write-Host "::error::pluginmaster.json 顶层必须是 JSON 数组 [ { ... } ]，不能是单个对象。"
+            exit 1
+          }
+          if ($parsed.Count -lt 1) {
+            Write-Host "::error::pluginmaster.json 是空数组。"
+            exit 1
+          }
+
+          $repo = $parsed[0]
           Write-Host "tag 版本     : $v"
           Write-Host "仓库清单版本 : $($repo.AssemblyVersion)"
           if ($repo.AssemblyVersion -ne $v) {
@@ -78,7 +93,7 @@ jobs:
             Write-Host "::error::IconUrl 必须是 https 外链：$icon"
             exit 1
           }
-          Write-Host "清单版本与 IconUrl 检查通过：$icon"
+          Write-Host "清单是数组、版本与 IconUrl 检查通过：$icon"
 
       - name: 编译
         shell: pwsh
