@@ -1,0 +1,120 @@
+name: build
+
+# 打一个 v 开头的 tag 就会自动构建，并把 latest.zip 挂到 Release 上。
+# 手动跑也可以：仓库页面 → Actions → build → Run workflow。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# softprops/action-gh-release 建 Release 需要写权限
+permissions:
+  contents: write
+
+env:
+  # 官方 Dalamud 发行包（编译插件只需要里面的 dev 程序集）
+  DALAMUD_DIST_URL: https://goatcorp.github.io/dalamud-distrib/latest.zip
+  DALAMUD_HOME: ${{ github.workspace }}\dalamud
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      # 国服卫月 15 的 runtimeconfig 是 net10.0，所以 CI 也要装 .NET 10 SDK
+      - name: 装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: 算版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}"
+          if ($v.StartsWith('v')) { $v = $v.Substring(1) }
+          if ([string]::IsNullOrWhiteSpace($v)) { $v = '0.0.0' }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "本次版本: $v"
+
+      - name: 下载 Dalamud dev 程序集
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:DALAMUD_DIST_URL -OutFile dalamud.zip
+          New-Item -ItemType Directory -Force -Path $env:DALAMUD_HOME | Out-Null
+          Expand-Archive -Path dalamud.zip -DestinationPath $env:DALAMUD_HOME -Force
+          Remove-Item dalamud.zip
+          Get-ChildItem $env:DALAMUD_HOME -Filter *.dll | Select-Object -ExpandProperty Name
+
+      # 插件 zip 里那份清单的版本号跟着 tag 走。
+      # 注意：Dalamud 安装时会校验「zip 内清单版本」必须与「插件库清单版本」完全一致，
+      # 差一个 ".0" 都会报 "Distributed plugin version does not match repo version"。
+      # 所以 pluginmaster.json 里的 AssemblyVersion 必须写成 tag 去掉 v 的原文（1.0.0 而不是 1.0.0.0）。
+      - name: 让清单版本号跟上 tag
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $raw = Get-Content PillionRider.json -Raw
+          $raw = $raw -replace '("AssemblyVersion"\s*:\s*")[^"]*(")', "`${1}$v`${2}"
+          Set-Content -Path PillionRider.json -Value $raw -Encoding utf8NoBOM
+
+      # 版本号对不上就是装不上，而且只会在用户那边报错，所以在这里先卡住。
+      - name: 校验 pluginmaster.json 版本与 tag 一致
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $repo = (Get-Content pluginmaster.json -Raw | ConvertFrom-Json)[0]
+          Write-Host "tag 版本     : $v"
+          Write-Host "仓库清单版本 : $($repo.AssemblyVersion)"
+          if ($repo.AssemblyVersion -ne $v) {
+            Write-Host "::error::pluginmaster.json 的 AssemblyVersion ($($repo.AssemblyVersion)) 与 tag ($v) 不一致，安装时会报 version does not match"
+            exit 1
+          }
+          $icon = $repo.IconUrl
+          if ($icon -and $icon -notmatch '^https://') {
+            Write-Host "::error::IconUrl 必须是 https 外链：$icon"
+            exit 1
+          }
+          Write-Host "清单版本与 IconUrl 检查通过：$icon"
+
+      - name: 编译
+        shell: pwsh
+        run: |
+          dotnet build PillionRider.csproj -c Release `
+            -p:Version=${{ steps.ver.outputs.version }} `
+            -p:DalamudLibPath="$env:DALAMUD_HOME"
+
+      - name: 打包 latest.zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item bin/Release/PillionRider.dll  dist/
+          Copy-Item bin/Release/PillionRider.json dist/
+          if (Test-Path bin/Release/PillionRider.deps.json) {
+            Copy-Item bin/Release/PillionRider.deps.json dist/
+          }
+          Compress-Archive -Path dist/* -DestinationPath dist/latest.zip -Force
+          Get-ChildItem dist | Select-Object Name, Length
+
+      # 图标单独挂一份到 Release 上：清单里的 IconUrl 走仓库（jsDelivr / raw），
+      # Release 资产是第二份兜底，方便直接把 URL 指到 releases/latest/download 上。
+      - name: 带上图标
+        shell: pwsh
+        run: |
+          if (Test-Path assets/icon-512.png) {
+            Copy-Item assets/icon-512.png dist/icon-512.png
+            Write-Host "图标已就绪: $((Get-Item dist/icon-512.png).Length) 字节"
+          } else {
+            Write-Host "没有 assets/icon-512.png，跳过"
+          }
+
+      - name: 发 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/latest.zip
+            dist/icon-512.png
+          generate_release_notes: true

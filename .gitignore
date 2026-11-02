@@ -1,0 +1,116 @@
+# ============================================================
+# 这个仓库只放「使用者必须拿到的东西」：
+#   *.cs / *.csproj
+#   PillionRider.json / pluginmaster.json
+#   LICENSE / README.md
+#   assets/icon-512.png / assets/icon.svg
+#   .github/workflows/build.yml
+#   .gitignore
+# 其余开发用的脚本、日志、设计稿、笔记、会话数据一律忽略。
+#
+# 原则：白名单思维 —— 先假设所有东西都不该进仓库，
+# 只有明确要分享的才留下。加新东西前先问「使用者需要它才能装/用吗」。
+# ============================================================
+
+# ---- .NET 构建产物 ----
+bin/
+obj/
+bin-*/
+obj-*/
+**/bin/
+**/obj/
+[Dd]ebug/
+[Rr]elease/
+*.dll
+*.pdb
+*.exe
+*.user
+*.suo
+*.userprefs
+*.cache
+*.nuget.dgspec.json
+project.assets.json
+project.nuget.cache
+.vs/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---- 本地开发脚本（不是插件运行所需）----
+# 注意：CI 用的是 .github/workflows/build.yml 里的 inline pwsh，
+# 不是 .ps1 文件，所以这条不会影响构建。
+*.ps1
+*.bat
+*.cmd
+*.sh
+
+# ---- 提交/标签信息临时文件 ----
+.commitmsg*
+.tagmsg
+*.tagmsg
+*.commitmsg
+
+# ---- 构建、打包产物与日志 ----
+*.log
+build-*.log
+dist/
+latest.zip
+*.zip
+*.7z
+*.tar
+*.gz
+
+# ---- 开发笔记（工作备份，不进公开仓库）----
+DEVNOTES.md
+NOTES.md
+TODO.md
+
+# ---- 图标设计稿中间产物（只保留 icon-512.png 与 icon.svg）----
+assets/icon-1024.png
+assets/icon-256.png
+assets/icon-preview.png
+assets/icon-sizes.png
+assets/icon.html
+assets/icon-sizes.html
+assets/*-report.json
+assets/README.md
+
+# ---- 数据库 / 会话 / 记忆（绝对不能进仓库）----
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.jsonl
+*.jsonl.zstd
+
+# ---- 本地私有与凭证 ----
+_config.yml
+*.local.json
+.env
+.env.*
+secrets*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# ---- 工具/会话产生的本地目录 ----
+.dsh-*/
+.omni-*/
+.dsh-meow/
+.omni-workstation/
+sessions/
+
+# ---- 临时文件 ----
+.tmp*
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# ---- OS ----
+Thumbs.db
+desktop.ini
+.DS_Store
