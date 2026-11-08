@@ -67,15 +67,23 @@ jobs:
         run: |
           $v = '${{ steps.ver.outputs.version }}'
           $raw = Get-Content pluginmaster.json -Raw
-          $parsed = $raw | ConvertFrom-Json
 
           # 插件库清单必须是「数组」，哪怕只有一个插件。
           # 写成单个对象时 Dalamud 反序列化成 List<RemotePluginManifest> 会直接抛异常，
           # 用户在 /xlsettings 里只会看到一句「下载失败」，两个地址都一样 —— 排查起来极其费劲。
-          if ($parsed -isnot [System.Array]) {
+          #
+          # 这里必须「先看原文首字符，再解析」：
+          # PowerShell 7 的 ConvertFrom-Json 默认会把 JSON 数组逐元素展开到管道里，
+          # 于是 `$raw | ConvertFrom-Json` 对「只有一个元素的数组」拿到的是那个对象本身，
+          # `$parsed -isnot [System.Array]` 恒为真 —— 检查会误报，把好好的清单判成单对象。
+          # 所以：原文首字符必须是 '['；解析用 -NoEnumerate 保住数组形状；再兜一层 @()。
+          if (-not $raw.TrimStart().StartsWith('[')) {
             Write-Host "::error::pluginmaster.json 顶层必须是 JSON 数组 [ { ... } ]，不能是单个对象。"
             exit 1
           }
+
+          $parsed = @($raw | ConvertFrom-Json -NoEnumerate)
+
           if ($parsed.Count -lt 1) {
             Write-Host "::error::pluginmaster.json 是空数组。"
             exit 1
