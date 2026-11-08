@@ -4,6 +4,11 @@ using System.Reflection;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
+#if NATIVE_ACTION
+using CSCharacter = FFXIVClientStructs.FFXIV.Client.Game.Character.Character;
+using CSCharacterModes = FFXIVClientStructs.FFXIV.Client.Game.Character.CharacterModes;
+using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
+#endif
 
 namespace PillionRider;
 
@@ -822,6 +827,204 @@ internal static class GameApi
         {
             return 0;
         }
+    }
+
+    // ---------------------------------------------------------------- 客户端结构直读（NATIVE_ACTION）
+
+#if NATIVE_ACTION
+    /// <summary>
+    /// 读一个角色在客户端结构里的「角色模式」（<c>Character.Mode</c>）。
+    ///
+    /// <para>
+    /// <b>为什么需要这个</b>：<c>ICharacter.CurrentMount</c> 对所有<b>有坐骑</b>的人都返回非空，
+    /// 但它区分不出「我是骑手」和「我是乘客」。坐在别人多人坐骑上的人，
+    /// 自己的 <c>CurrentMount</c> 同样是 null（官方文档原文：「Will be null if the character
+    /// doesn't have a mount.」），位置又跟坐骑完全重合 —— 于是「谁骑着这台坐骑」这件事
+    /// 在高层 API 里根本答不出来。
+    /// </para>
+    ///
+    /// <para>
+    /// 客户端结构里答案是明确的：<c>Character.Mode == CharacterModes.RidingPillion</c>
+    /// 的人就是乘客（FFXIVClientStructs 里这一项的注释写着「Param is the pillion seat number」，
+    /// <c>ModeParam</c> 就是他的座位号）。骑手的 <c>Mode</c> 是 <c>Mounted</c>。
+    /// </para>
+    /// </summary>
+    public static bool TryGetCharacterMode(IGameObject obj, out int mode, out int modeParam)
+    {
+        mode = 0;
+        modeParam = 0;
+
+        if (obj == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            unsafe
+            {
+                var address = obj.Address;
+                if (address == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                var character = ((CSGameObject*)address)->GetAsCharacter();
+                if (character == null)
+                {
+                    return false;
+                }
+
+                mode = (int)character->Mode;
+                modeParam = character->ModeParam;
+                return true;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 这个人是不是「坐在别人的共同乘骑座位上」（乘客），而不是骑手。
+    ///
+    /// 只认 <c>CharacterModes.RidingPillion</c>。读不到结构时返回 false（当骑手处理），
+    /// 保持旧行为，不因为一个新判据读失败就把所有候选都挡掉。
+    /// </summary>
+    public static bool IsPillionPassenger(IGameObject obj)
+    {
+        if (!TryGetCharacterMode(obj, out var mode, out _))
+        {
+            return false;
+        }
+
+        return mode == (int)CSCharacterModes.RidingPillion;
+    }
+
+    /// <summary>
+    /// 直接从客户端结构读「这个人骑的坐骑 ID」（<c>Character.Mount.MountId</c>）。
+    ///
+    /// <para>
+    /// 这是<b>最权威</b>的一条：<c>MountContainer.MountId</c> 的类型是 <c>UInt16</c>，
+    /// 骑手才有值；乘客这个字段是 0（他骑的是别人的坐骑，自己没有 MountContainer 内容）。
+    /// 相比之下 <c>ICharacter.CurrentMount</c> 要走反射猜成员名，还常常读不出 ID。
+    /// </para>
+    ///
+    /// <para>
+    /// 读不到结构、或者这个字段是 0 → 返回 false，调用方继续走反射兜底。
+    /// </para>
+    /// </summary>
+    public static bool TryGetMountedIdFromStruct(IGameObject obj, out uint mountId)
+    {
+        mountId = 0;
+
+        if (obj == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            unsafe
+            {
+                var address = obj.Address;
+                if (address == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                var character = ((CSGameObject*)address)->GetAsCharacter();
+                if (character == null)
+                {
+                    return false;
+                }
+
+                var raw = character->Mount.MountId;
+                if (raw == 0)
+                {
+                    return false;
+                }
+
+                mountId = raw;
+                return true;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 读 <c>Character.Mount.MountedEntityIds</c>：这台坐骑上已经坐了哪些人（EntityId 列表）。
+    ///
+    /// 这是判断「还有没有空位」的唯一直接依据。座位总数是
+    /// <c>1 + Mount.ExtraSeats</c>（骑手自己占 1 个），已坐人数就是这个列表的长度。
+    /// 读不到返回空数组。
+    /// </summary>
+    public static uint[] GetMountedEntityIds(IGameObject rider)
+    {
+        if (rider == null)
+        {
+            return Array.Empty<uint>();
+        }
+
+        try
+        {
+            unsafe
+            {
+                var address = rider.Address;
+                if (address == IntPtr.Zero)
+                {
+                    return Array.Empty<uint>();
+                }
+
+                var character = ((CSGameObject*)address)->GetAsCharacter();
+                if (character == null)
+                {
+                    return Array.Empty<uint>();
+                }
+
+                var span = character->Mount.MountedEntityIds;
+                if (span.Length == 0)
+                {
+                    return Array.Empty<uint>();
+                }
+
+                var result = new uint[span.Length];
+                for (var i = 0; i < span.Length; i++)
+                {
+                    result[i] = span[i];
+                }
+
+                return result;
+            }
+        }
+        catch
+        {
+            return Array.Empty<uint>();
+        }
+    }
+#endif
+
+    /// <summary>角色模式的中文说明，给 /pr scan 用。读不到返回 null。</summary>
+    public static string DescribeCharacterMode(IGameObject obj)
+    {
+        if (!TryGetCharacterMode(obj, out var mode, out var modeParam))
+        {
+            return null;
+        }
+
+#if NATIVE_ACTION
+        var name = Enum.IsDefined(typeof(CSCharacterModes), mode)
+            ? ((CSCharacterModes)mode).ToString()
+            : mode.ToString();
+
+        return modeParam != 0 ? $"{name}/{modeParam}" : name;
+#else
+        return mode.ToString();
+#endif
     }
 
     private static ConditionFlag[] ResolveDutyFlags()

@@ -16,7 +16,13 @@ namespace PillionRider;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 1;
+    /// <summary>
+    /// 配置结构版本。<b>1</b> = 早期默认值（30 / 500 / 8000 / 3 / 60000），
+    /// <b>2</b> = 现行默认值（5 / 260 / 1000 / 8 / 5000）。
+    /// </summary>
+    public const int CurrentVersion = 2;
+
+    public int Version { get; set; } = CurrentVersion;
 
     /// <summary>总开关。</summary>
     public bool Enabled { get; set; } = true;
@@ -66,22 +72,22 @@ public sealed class Configuration : IPluginConfiguration
     public string ExtraMountIds { get; set; } = string.Empty;
 
     /// <summary>最大触发距离（米）。0 = 不限制。</summary>
-    public float MaxDistance { get; set; } = 30f;
+    public float MaxDistance { get; set; } = 5f;
 
     /// <summary>轮询间隔（毫秒）。</summary>
-    public int PollIntervalMs { get; set; } = 500;
+    public int PollIntervalMs { get; set; } = 260;
 
     /// <summary>两次触发之间的最小冷却（毫秒）。</summary>
-    public int CooldownMs { get; set; } = 8000;
+    public int CooldownMs { get; set; } = 1000;
 
     /// <summary>
     /// 同一个候选连续失败几次后，暂时不再试它（避免对着一个上不去的坐骑反复触发）。
     /// 0 = 不限制。
     /// </summary>
-    public int MaxFailuresPerTarget { get; set; } = 3;
+    public int MaxFailuresPerTarget { get; set; } = 8;
 
     /// <summary>失败后拉黑多久（毫秒）。</summary>
-    public int FailureBackoffMs { get; set; } = 60000;
+    public int FailureBackoffMs { get; set; } = 5000;
 
     /// <summary>
     /// 执行前先把目标切到该队友，然后用 <c>&lt;t&gt;</c> 发指令（默认 <c>true</c>，主路线）。
@@ -155,5 +161,56 @@ public sealed class Configuration : IPluginConfiguration
     public void Save()
     {
         Plugin.PluginInterface.SavePluginConfig(this);
+    }
+
+    /// <summary>
+    /// 把旧版本配置升到当前版本。返回 <c>true</c> 表示改过东西、调用方应当存盘。
+    ///
+    /// <para>
+    /// <b>为什么要做这一步</b>：默认值改了（30→5 / 500→260 / 8000→1000 / 3→8 / 60000→5000），
+    /// 但已有用户的配置文件里躺着的是旧默认值 —— 反序列化会把它们<b>原样读回来</b>，
+    /// 于是「新默认值」对老用户完全不生效，他们会觉得这版改了个寂寞。
+    /// </para>
+    ///
+    /// <para>
+    /// <b>只搬那些「还是旧默认值」的字段</b>：值等于旧默认值，说明用户从来没动过它，
+    /// 换成新默认值是安全的；值不等于旧默认值，说明是用户自己定的，一个字都不碰。
+    /// </para>
+    /// </summary>
+    public bool Migrate()
+    {
+        if (this.Version >= CurrentVersion)
+        {
+            return false;
+        }
+
+        // v1 → v2：只替换「仍是旧默认值」的字段。
+        if (Math.Abs(this.MaxDistance - 30f) < 0.001f)
+        {
+            this.MaxDistance = 5f;
+        }
+
+        if (this.PollIntervalMs == 500)
+        {
+            this.PollIntervalMs = 260;
+        }
+
+        if (this.CooldownMs == 8000)
+        {
+            this.CooldownMs = 1000;
+        }
+
+        if (this.MaxFailuresPerTarget == 3)
+        {
+            this.MaxFailuresPerTarget = 8;
+        }
+
+        if (this.FailureBackoffMs == 60000)
+        {
+            this.FailureBackoffMs = 5000;
+        }
+
+        this.Version = CurrentVersion;
+        return true;
     }
 }

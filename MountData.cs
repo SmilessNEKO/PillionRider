@@ -37,6 +37,12 @@ internal static class MountData
 
     public static string FailureReason => failureReason;
 
+    /// <summary>
+    /// 坐骑表是否已经读通了。<c>false</c> 时 <see cref="GetExtraSeats"/> 一律返回 null，
+    /// 调用方应当按「不知道座位数」处理，而不是当成 0。
+    /// </summary>
+    public static bool IsLoaded => available;
+
     public static void Initialize(IDataManager dataManager, IPluginLog log)
     {
         if (available || attempts >= MaxAttempts)

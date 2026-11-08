@@ -202,6 +202,21 @@ public sealed class Plugin : IDalamudPlugin
 
         Config = pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
+        // 老配置升级：把「还是旧默认值」的字段换成新默认值（用户自己调过的一律不动）。
+        // 详见 Configuration.Migrate()。
+        if (Config.Migrate())
+        {
+            Config.Save();
+            log.Information(
+                "[PillionRider] 配置已升级到 v{Version}：距离 {Distance} 米 / 轮询 {Poll} 毫秒 / 冷却 {Cooldown} 毫秒 / 连续失败 {Failures} 次 / 退避 {Backoff} 毫秒",
+                Configuration.CurrentVersion,
+                Config.MaxDistance,
+                Config.PollIntervalMs,
+                Config.CooldownMs,
+                Config.MaxFailuresPerTarget,
+                Config.FailureBackoffMs);
+        }
+
         // 老版本的配置里 UseNativeAction 默认是 true（那时候以为 GeneralAction 里有「共同骑乘」，
         // 结果 5 是分解 —— 点开分解道具窗口的就是它）。现在游戏指令是主力路线，
         // 两者同时为 true 会让失败回退又去点分解，所以在加载时把旧的独立模式关掉。
@@ -699,6 +714,16 @@ public sealed class Plugin : IDalamudPlugin
         // 主路径：直接问角色「你在骑哪个坐骑」。
         // 这条路比「坐骑对象反查骑手」可靠得多 —— 实测坐骑对象的 OwnerId 常常是
         // 0xE0000000（客户端本地对象，不是网络实体），根本反查不出骑手是谁。
+        //
+        // 但这条路上有个陷阱，正是「坐骑上已经有乘客 → 反复尝试上车、从不成功」的根因：
+        // 坐在别人多人坐骑上的<b>乘客</b>，自己的 CurrentMount 同样返回那台坐骑
+        // （他确实「在坐骑上」），于是乘客也被登记成「骑着这台坐骑的人」。
+        // 一旦队友的坐骑上已经有了人，候选表里就多出一个「骑手 = 乘客」的条目，
+        // FindCandidate 撞上它就对着乘客发 /共同乘骑 —— 对着一个正在共同乘骑里的人
+        // 发共同乘骑，游戏必定拒绝，然后每过一个冷却就重试一次，永远上不去。
+        //
+        // 判据在客户端结构里是明确的：Character.Mode == RidingPillion 就是乘客
+        // （ModeParam 是他的座位号），骑手是 Mounted。所以先按这个把乘客排掉。
         for (var idx = 0; idx < this.objectTable.Length; idx++)
         {
             var obj = this.objectTable[idx];
@@ -718,6 +743,27 @@ public sealed class Plugin : IDalamudPlugin
 
             if (!GameApi.IsPlayer(obj))
             {
+                continue;
+            }
+
+            // 乘客不是骑手，绝不能进候选表。
+            if (GameApi.IsPillionPassenger(obj))
+            {
+                if (Config.DebugLog)
+                {
+                    this.log.Information(
+                        "[PillionRider] 跳过乘客：{Name}（已经在别人的共同乘骑座位上）",
+                        obj.Name != null ? obj.Name.ToString() : obj.GameObjectId.ToString());
+                }
+
+                continue;
+            }
+
+            // 最权威的坐骑 ID 来源：客户端结构里的 Character.Mount.MountId（UInt16）。
+            // 骑手才有值，乘客恒为 0。反射那条 CurrentMount 要猜成员名，还可能读成 0。
+            if (GameApi.TryGetMountedIdFromStruct(obj, out var structMountId) && structMountId != 0)
+            {
+                result[obj.GameObjectId] = structMountId;
                 continue;
             }
 
@@ -797,6 +843,14 @@ public sealed class Plugin : IDalamudPlugin
                 }
 
                 if (candidate.GameObjectId == selfId || !GameApi.IsPlayer(candidate))
+                {
+                    continue;
+                }
+
+                // 位置配对最大的坑：乘客的位置和坐骑完全重合（他就在坐骑上），
+                // 所以「离坐骑最近的玩家」很可能正是已经坐在上面的乘客。
+                // 对着乘客发共同乘骑必定失败，还会一路重试 —— 必须排掉。
+                if (GameApi.IsPillionPassenger(candidate))
                 {
                     continue;
                 }
@@ -1041,6 +1095,14 @@ public sealed class Plugin : IDalamudPlugin
             }
 
             if (!mountsByOwner.TryGetValue(obj.GameObjectId, out var mountId))
+            {
+                continue;
+            }
+
+            // 双保险：CollectMounts 已经把乘客排掉了，这里再挡一次。
+            // 任何一条路径把乘客漏进候选表，都会变成「对着正在共同乘骑的人发共同乘骑」，
+            // 那是必定失败、而且会被 VerifyLastAction 记成失败然后无限重试的组合。
+            if (GameApi.IsPillionPassenger(obj))
             {
                 continue;
             }
@@ -1377,6 +1439,59 @@ public sealed class Plugin : IDalamudPlugin
                 // 单座坐骑带不了人。这也是「队友骑单人坐骑下坐骑时被误触发」的另一半原因：
                 // 坐骑对象在消散途中仍然带着正确的 DataId，只是这台坐骑本来就只有一个座位。
                 return false;
+            }
+        }
+
+        // 座位满了就别再试了 —— 这条是「反复尝试上车但一次都没成功」的第二个成因。
+        //
+        // 座位总数 = 1（骑手自己） + Mount.ExtraSeats；已坐人数 = Mount.MountedEntityIds 的长度。
+        // 满员时游戏对 /共同骑乘 的处理是静默忽略（不发错误、也不让你上去），
+        // 插件这边只看得到「RidingPillion 没亮」，于是记一次失败、下个冷却再来一遍，
+        // 直到 MaxFailuresPerTarget 用完才停 —— 表现就是对着满员坐骑反复撞墙。
+        //
+        // 只有在「座位数读得出来」且「已坐人数已知」时才下结论；任何一边读不到都放行，
+        // 保持旧行为（宁可让游戏自己拒绝，也不要因为新判据读失败而漏掉真的能上的机会）。
+        if (MountData.IsLoaded)
+        {
+            var extraSeats = MountData.GetExtraSeats(mountId);
+            if (extraSeats.HasValue)
+            {
+                var seatCount = 1 + extraSeats.Value;
+                var occupantIds = GameApi.GetMountedEntityIds(rider);
+
+                // MountedEntityIds 到底含不含骑手自己，客户端各版本实现不一致，
+                // 所以用「列表里有没有骑手自己的 EntityId」来判定口径，两种都能算对。
+                if (occupantIds.Length > 0)
+                {
+                    var riderIncluded = false;
+                    var riderEntityId = rider.EntityId;
+                    for (var i = 0; i < occupantIds.Length; i++)
+                    {
+                        if (riderEntityId != 0 && occupantIds[i] == riderEntityId)
+                        {
+                            riderIncluded = true;
+                            break;
+                        }
+                    }
+
+                    // 含骑手 → 已坐人数就是列表长度；不含骑手 → 列表长度再 +1。
+                    var occupied = riderIncluded ? occupantIds.Length : occupantIds.Length + 1;
+
+                    if (occupied >= seatCount)
+                    {
+                        if (Config.DebugLog)
+                        {
+                            this.log.Information(
+                                "[PillionRider] 跳过满员坐骑：{Name} 的 {Mount} 座位 {SeatCount} 个，已坐 {Occupied} 人",
+                                rider.Name != null ? rider.Name.ToString() : rider.GameObjectId.ToString(),
+                                mountId,
+                                seatCount,
+                                occupied);
+                        }
+
+                        return false;
+                    }
+                }
             }
         }
 
@@ -1839,9 +1954,20 @@ public sealed class Plugin : IDalamudPlugin
                 mountText = $"CurrentMount={rawId}（未进候选表）";
             }
 
+            // 角色模式：Mounted = 骑手，RidingPillion = 乘客（后面那个数字是他的座位号）。
+            // 「坐骑上已经有人时反复上车失败」这个问题的判据就在这一项上，
+            // 所以必须让它出现在 /pr scan 里，现场一眼就能看出谁被当成了骑手。
+            var modeText = GameApi.DescribeCharacterMode(obj);
+            var modeLine = string.IsNullOrEmpty(modeText) ? string.Empty : $" 模式={modeText}";
+
+            if (GameApi.IsPillionPassenger(obj))
+            {
+                modeLine += "（乘客）";
+            }
+
             var partyText = IsPartyMember(party, obj) ? "队" : "-";
 
-            this.Notify($"玩家#{playerIndex} {name} 骑乘={mountText} 队伍={partyText} goId={goId}");
+            this.Notify($"玩家#{playerIndex} {name} 骑乘={mountText} 队伍={partyText}{modeLine} goId={goId}");
             playerIndex++;
         }
 
