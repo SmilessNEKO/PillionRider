@@ -13,6 +13,32 @@ using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 namespace PillionRider;
 
 /// <summary>
+/// 一个角色相对「多人坐骑」的身份。这是 v1.1.3 修复的核心判据。
+///
+/// <para>
+/// 共同乘骑里只有<b>第一个召唤出坐骑的人（司机）</b>是 <c>/共同骑乘</c> 的合法目标；
+/// 后上来的第二个人是<b>乘客</b>，不是司机。v1.1.1 拿「队友有没有坐骑 / 状态」当判据，
+/// 把乘客当成了目标，对着一个已经在共同乘骑里的人反复发指令，永远失败。
+/// 客户端结构里这件事是确定的：<c>Character.Mount.MountId != 0</c> 的人是司机，
+/// <c>Character.Mode == RidingPillion</c> 的人是乘客。
+/// </para>
+/// </summary>
+public enum MountRole
+{
+    /// <summary>角色结构读不到（地址为空 / GetAsCharacter 失败 / 抛异常）→ 调用方退回反射 CurrentMount 兜底。</summary>
+    Unknown,
+
+    /// <summary>确认是司机：召唤坐骑的那个人，<c>/共同骑乘</c> 唯一合法目标。mountId 是他的坐骑 ID。</summary>
+    Driver,
+
+    /// <summary>确认是乘客：<c>Mode == RidingPillion</c>，坐在别人的共同乘骑座位上，绝不能当目标。</summary>
+    Passenger,
+
+    /// <summary>结构可读但没坐骑（步行 / 下坐骑途中）：不进候选表。</summary>
+    OnFoot,
+}
+
+/// <summary>
 /// 版本差异适配层 + 高频查询缓存。
 ///
 /// 这个类同时干两件事，因为它们都是「每帧/每次轮询都要碰、又容易随版本变」的东西：
@@ -959,9 +985,17 @@ internal static class GameApi
     /// <summary>
     /// 读 <c>Character.Mount.MountedEntityIds</c>：这台坐骑上已经坐了哪些人（EntityId 列表）。
     ///
-    /// 这是判断「还有没有空位」的唯一直接依据。座位总数是
-    /// <c>1 + Mount.ExtraSeats</c>（骑手自己占 1 个），已坐人数就是这个列表的长度。
-    /// 读不到返回空数组。
+    /// <para>
+    /// <b>关键：这个 span 是定长 7 槽位的 <c>FixedSizeArray7&lt;uint&gt;</c>，空座位用 0 填充。</b>
+    /// 直接把整段拷出来会把「没坐人的空槽」也算成乘客 —— v1.1.2 就是栽在这里：
+    /// 每台坐骑恒有 7 个 occupant，<c>occupied &gt;= seatCount</c> 几乎永远成立，
+    /// 于是所有候选被判「满员」跳过，插件再也不上车。这里必须只收集非 0 的槽位。
+    /// </para>
+    ///
+    /// <para>
+    /// 座位总数是 <c>1 + Mount.ExtraSeats</c>（骑手自己占 1 个），已坐人数 = 本方法返回数组长度。
+    /// 读不到返回空数组（调用方会保持旧行为、放行，不因为读失败就乱判满员）。
+    /// </para>
     /// </summary>
     public static uint[] GetMountedEntityIds(IGameObject rider)
     {
@@ -992,19 +1026,151 @@ internal static class GameApi
                     return Array.Empty<uint>();
                 }
 
-                var result = new uint[span.Length];
+                // 只收非 0 的 EntityId：0 是空座位，不是人。
+                var buffer = new List<uint>(span.Length);
                 for (var i = 0; i < span.Length; i++)
                 {
-                    result[i] = span[i];
+                    var id = span[i];
+                    if (id != 0)
+                    {
+                        buffer.Add(id);
+                    }
                 }
 
-                return result;
+                return buffer.Count == 0 ? Array.Empty<uint>() : buffer.ToArray();
             }
         }
         catch
         {
             return Array.Empty<uint>();
         }
+    }
+
+    /// <summary>
+    /// 这个人是不是「司机」——也就是这台多人坐骑真正的主人、<c>/共同骑乘</c> 唯一合法的目标。
+    ///
+    /// <para>
+    /// 判据只有一个：<c>Character.Mount.MountId != 0</c>。这是客户端结构里最硬的一条：
+    /// <b>只有召唤出坐骑的那个人（司机）才有 MountId；后上来的乘客这个字段恒为 0</b>
+    /// （他骑的是别人的坐骑，自己没有 MountContainer 内容），而且乘客的
+    /// <c>Character.Mode == RidingPillion</c>。
+    /// </para>
+    ///
+    /// <para>
+    /// 为什么不用「有没有坐骑 / 离坐骑最近 / CurrentMount 非空」来判：共同乘骑里
+    /// 第二个人上来之后，他同样「有坐骑」、位置也跟坐骑完全重合、CurrentMount 也可能非空，
+    /// 高层 API 根本分不出谁是司机。v1.1.1 就是这么把乘客当成了目标，对着一个已经在
+    /// 共同乘骑里的人反复发 /共同骑乘，永远失败。
+    /// </para>
+    ///
+    /// <para>
+    /// 混合场景（A 骑单人坐骑 + B 骑多人坐骑）同样成立：A、B 各有自己的 MountId，
+    /// 各自只对自己的坐骑负责；PassesFilters 会再把 A 的单座坐骑挡掉，只对 B 发指令。
+    /// </para>
+    ///
+    /// 读不到结构时返回 false（不把任何人当司机），保持保守；调用方另有反射兜底。
+    /// </summary>
+    public static bool IsMountDriver(IGameObject obj)
+    {
+        return TryGetMountedIdFromStruct(obj, out _);
+    }
+
+    /// <summary>
+    /// 一次性判定一个角色相对「多人坐骑」的身份，并给出司机的坐骑 ID。
+    ///
+    /// <para>
+    /// 这是 v1.1.3 修复的核心：<b>只允许「正向确认是司机」的角色进候选表</b>。
+    /// 判定优先级（结构可信时绝不退回反射 CurrentMount）：
+    /// </para>
+    /// <list type="number">
+    /// <item><c>Mode == RidingPillion</c> → <see cref="MountRole.Passenger"/>（乘客，绝不能当目标）；</item>
+    /// <item><c>Mount.MountId != 0</c> → <see cref="MountRole.Driver"/>（司机，mountId 就是他的坐骑）；</item>
+    /// <item>结构可读但没坐骑 → <see cref="MountRole.OnFoot"/>；</item>
+    /// <item>结构读不到 / 抛异常 → <see cref="MountRole.Unknown"/>（调用方才允许退回反射兜底）。</item>
+    /// </list>
+    ///
+    /// <para>
+    /// 把乘客判据放在最前面是刻意的：乘客的 <c>MountId</c> 恒为 0，本来也进不了 Driver 分支，
+    /// 但显式先判乘客能让语义更清楚，也能挡住「乘客恰好残留了脏 MountId」这种边缘情况。
+    /// </para>
+    /// </summary>
+    public static MountRole ProbeMountRole(IGameObject obj, out uint mountId)
+    {
+        mountId = 0;
+
+        if (obj == null)
+        {
+            return MountRole.Unknown;
+        }
+
+        try
+        {
+            unsafe
+            {
+                var address = obj.Address;
+                if (address == IntPtr.Zero)
+                {
+                    return MountRole.Unknown;
+                }
+
+                var character = ((CSGameObject*)address)->GetAsCharacter();
+                if (character == null)
+                {
+                    return MountRole.Unknown;
+                }
+
+                // 乘客判据最硬：Mode == RidingPillion（ModeParam 是座位号）。
+                if (character->Mode == CSCharacterModes.RidingPillion)
+                {
+                    return MountRole.Passenger;
+                }
+
+                // 司机判据：MountId != 0 —— 只有召唤出坐骑的人才有值。
+                var raw = character->Mount.MountId;
+                if (raw != 0)
+                {
+                    mountId = raw;
+                    return MountRole.Driver;
+                }
+
+                return MountRole.OnFoot;
+            }
+        }
+        catch
+        {
+            return MountRole.Unknown;
+        }
+    }
+#else
+    // ---------------------------------------------------------------- 降级路径 stub（没有 FFXIVClientStructs）
+    // Plugin.cs 无条件调用下面这些判据，所以关掉 NATIVE_ACTION 时也必须给出同名方法，
+    // 否则 -p:DisableNativeAction=true 的降级构建直接编不过。
+    // stub 一律返回「读不到/不是乘客/不是司机/无 occupant」，让上层退回反射兜底与旧行为。
+
+    public static bool TryGetCharacterMode(IGameObject obj, out int mode, out int modeParam)
+    {
+        mode = 0;
+        modeParam = 0;
+        return false;
+    }
+
+    public static bool IsPillionPassenger(IGameObject obj) => false;
+
+    public static bool TryGetMountedIdFromStruct(IGameObject obj, out uint mountId)
+    {
+        mountId = 0;
+        return false;
+    }
+
+    public static uint[] GetMountedEntityIds(IGameObject rider) => Array.Empty<uint>();
+
+    public static bool IsMountDriver(IGameObject obj) => false;
+
+    // 降级路径读不到客户端结构，一律回 Unknown：让上层退回反射 CurrentMount 兜底与旧行为。
+    public static MountRole ProbeMountRole(IGameObject obj, out uint mountId)
+    {
+        mountId = 0;
+        return MountRole.Unknown;
     }
 #endif
 
@@ -1017,10 +1183,12 @@ internal static class GameApi
         }
 
 #if NATIVE_ACTION
-        var name = Enum.IsDefined(typeof(CSCharacterModes), mode)
-            ? ((CSCharacterModes)mode).ToString()
-            : mode.ToString();
-
+        // CharacterModes 的底层类型是 Byte（value__ : Byte），而 mode 是装箱的 int。
+        // Enum.IsDefined(enumType, intValue) 要求传入值与底层类型一致，传 int 会直接抛
+        // 「Enum underlying type and the object must be same type or ... was 'System.Int32'」。
+        // v1.1.2 的 /pr scan 就是这么炸的。改成先按 byte 强转再 ToString()：
+        // 未定义的取值 ToString() 只会返回数字字符串，不会抛异常，比 IsDefined 更稳。
+        var name = ((CSCharacterModes)(byte)mode).ToString();
         return modeParam != 0 ? $"{name}/{modeParam}" : name;
 #else
         return mode.ToString();

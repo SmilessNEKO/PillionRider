@@ -711,19 +711,24 @@ public sealed class Plugin : IDalamudPlugin
 
         var result = new Dictionary<ulong, uint>();
 
-        // 主路径：直接问角色「你在骑哪个坐骑」。
+        // 主路径：用客户端结构「正向确认司机」—— 只有召唤出坐骑的那个人能进候选表。
+        //
         // 这条路比「坐骑对象反查骑手」可靠得多 —— 实测坐骑对象的 OwnerId 常常是
         // 0xE0000000（客户端本地对象，不是网络实体），根本反查不出骑手是谁。
         //
-        // 但这条路上有个陷阱，正是「坐骑上已经有乘客 → 反复尝试上车、从不成功」的根因：
-        // 坐在别人多人坐骑上的<b>乘客</b>，自己的 CurrentMount 同样返回那台坐骑
-        // （他确实「在坐骑上」），于是乘客也被登记成「骑着这台坐骑的人」。
-        // 一旦队友的坐骑上已经有了人，候选表里就多出一个「骑手 = 乘客」的条目，
-        // FindCandidate 撞上它就对着乘客发 /共同乘骑 —— 对着一个正在共同乘骑里的人
-        // 发共同乘骑，游戏必定拒绝，然后每过一个冷却就重试一次，永远上不去。
+        // 病根（用户 m14626 现场定位）：v1.1.1 拿「队友有没有坐骑 / CurrentMount 非空 /
+        // 离坐骑最近」这类模糊状态当判据。共同乘骑里第二个人（乘客）上来之后，他同样
+        // 「在坐骑上」、位置跟坐骑完全重合、高层 API 分不出谁是司机，于是插件把乘客
+        // 当成目标，对着一个已经在共同乘骑里的人反复发 /共同乘骑，永远失败。
         //
-        // 判据在客户端结构里是明确的：Character.Mode == RidingPillion 就是乘客
-        // （ModeParam 是他的座位号），骑手是 Mounted。所以先按这个把乘客排掉。
+        // 客户端结构里答案是确定的：
+        //   Character.Mode == RidingPillion  → 乘客（ModeParam 是座位号），绝不当目标
+        //   Character.Mount.MountId != 0    → 司机（只有召唤坐骑的人才有值），唯一合法目标
+        // 结构可信时据此定案，绝不退回模糊的 CurrentMount 反射把乘客捡回来；
+        // 只有结构完全读不到（Unknown，降级构建 / 版本差异）才允许退回反射兜底。
+        //
+        // 混合场景「A 骑单人坐骑 + B 骑多人坐骑」：A、B 都会被正向确认成各自坐骑的司机，
+        // 一起进候选表；随后 PassesFilters 的多座判定会挡掉 A 的单座，只对 B 发指令。
         for (var idx = 0; idx < this.objectTable.Length; idx++)
         {
             var obj = this.objectTable[idx];
@@ -746,36 +751,37 @@ public sealed class Plugin : IDalamudPlugin
                 continue;
             }
 
-            // 乘客不是骑手，绝不能进候选表。
-            if (GameApi.IsPillionPassenger(obj))
+            var role = GameApi.ProbeMountRole(obj, out var driverMountId);
+            if (role == MountRole.Driver && driverMountId != 0)
+            {
+                // 正向确认是司机，坐骑 ID 也是最权威的 Character.Mount.MountId。
+                result[obj.GameObjectId] = driverMountId;
+                continue;
+            }
+
+            if (role == MountRole.Passenger)
             {
                 if (Config.DebugLog)
                 {
                     this.log.Information(
-                        "[PillionRider] 跳过乘客：{Name}（已经在别人的共同乘骑座位上）",
+                        "[PillionRider] 跳过乘客：{Name}（已经在别人的共同乘骑座位上，不是司机）",
                         obj.Name != null ? obj.Name.ToString() : obj.GameObjectId.ToString());
                 }
 
                 continue;
             }
 
-            // 最权威的坐骑 ID 来源：客户端结构里的 Character.Mount.MountId（UInt16）。
-            // 骑手才有值，乘客恒为 0。反射那条 CurrentMount 要猜成员名，还可能读成 0。
-            if (GameApi.TryGetMountedIdFromStruct(obj, out var structMountId) && structMountId != 0)
+            if (role == MountRole.OnFoot)
             {
-                result[obj.GameObjectId] = structMountId;
+                // 结构可读且明确没坐骑：不进候选，也不退回反射（反射正是病根）。
                 continue;
             }
 
-            if (GameApi.TryGetRiderMountId(obj, out var riderMountId))
+            // role == Unknown：客户端结构读不到（降级构建 / 版本差异），
+            // 才允许退回旧的反射 CurrentMount 兜底。
+            if (GameApi.TryGetRiderMountId(obj, out var riderMountId) && riderMountId != 0)
             {
-                // 读到 0 视同没读到：0 不是坐骑 ID，是「读不出来」。
-                // 放它进去会一路传到 PassesFilters，被当成「没读到所以放开多座判定」，
-                // 于是单座坐骑也能当候选，最后发出注定失败的指令。
-                if (riderMountId != 0)
-                {
-                    result[obj.GameObjectId] = riderMountId;
-                }
+                result[obj.GameObjectId] = riderMountId;
             }
         }
 
@@ -850,8 +856,27 @@ public sealed class Plugin : IDalamudPlugin
                 // 位置配对最大的坑：乘客的位置和坐骑完全重合（他就在坐骑上），
                 // 所以「离坐骑最近的玩家」很可能正是已经坐在上面的乘客。
                 // 对着乘客发共同乘骑必定失败，还会一路重试 —— 必须排掉。
-                if (GameApi.IsPillionPassenger(candidate))
+                //
+                // 更根本地：结构可信时，主路径已经把所有真司机正向确认并登记进 result 了，
+                // 位置配对能碰到的「结构可读却还没登记」的人只可能是乘客或步行者，
+                // 都不该被当成这台坐骑的司机。所以这里只在结构完全读不到（Unknown，
+                // 即降级构建）时才退回「离坐骑最近 = 骑手」的旧猜测。
+                var candidateRole = GameApi.ProbeMountRole(candidate, out _);
+                if (candidateRole == MountRole.Passenger)
                 {
+                    if (Config.DebugLog)
+                    {
+                        this.log.Information(
+                            "[PillionRider] 位置配对跳过乘客：{Name}（在共同乘骑座位上，不是司机）",
+                            candidate.Name != null ? candidate.Name.ToString() : candidate.GameObjectId.ToString());
+                    }
+
+                    continue;
+                }
+
+                if (candidateRole != MountRole.Unknown)
+                {
+                    // Driver 已由主路径登记；OnFoot 本就不该进候选。结构可信时不靠位置猜。
                     continue;
                 }
 
@@ -1099,10 +1124,14 @@ public sealed class Plugin : IDalamudPlugin
                 continue;
             }
 
-            // 双保险：CollectMounts 已经把乘客排掉了，这里再挡一次。
-            // 任何一条路径把乘客漏进候选表，都会变成「对着正在共同乘骑的人发共同乘骑」，
-            // 那是必定失败、而且会被 VerifyLastAction 记成失败然后无限重试的组合。
-            if (GameApi.IsPillionPassenger(obj))
+            // 双保险：CollectMounts 主路径已经「正向确认司机」了，这里再用同一判据复核一次。
+            // 任何一条路径把乘客 / 步行者漏进候选表，都会变成「对着正在共同乘骑的人发
+            // 共同乘骑」，那是必定失败、还会被 VerifyLastAction 记成失败然后无限重试的组合。
+            //   Passenger / OnFoot → 绝不选
+            //   Driver           → 正向确认，放行
+            //   Unknown          → 结构读不到（降级构建），保持旧行为放行，靠 mountsByOwner 兜底
+            var role = GameApi.ProbeMountRole(obj, out _);
+            if (role == MountRole.Passenger || role == MountRole.OnFoot)
             {
                 continue;
             }
@@ -1444,52 +1473,74 @@ public sealed class Plugin : IDalamudPlugin
 
         // 座位满了就别再试了 —— 这条是「反复尝试上车但一次都没成功」的第二个成因。
         //
-        // 座位总数 = 1（骑手自己） + Mount.ExtraSeats；已坐人数 = Mount.MountedEntityIds 的长度。
-        // 满员时游戏对 /共同骑乘 的处理是静默忽略（不发错误、也不让你上去），
-        // 插件这边只看得到「RidingPillion 没亮」，于是记一次失败、下个冷却再来一遍，
-        // 直到 MaxFailuresPerTarget 用完才停 —— 表现就是对着满员坐骑反复撞墙。
+        // 座位总数 = 1（骑手自己） + Mount.ExtraSeats；已坐人数 = Mount.MountedEntityIds
+        // 里非 0 的槽位数（GameApi.GetMountedEntityIds 已经把空座位的 0 过滤掉了）。
+        // 满员时游戏对 /共同骑乘 是静默忽略，插件只看得到「RidingPillion 没亮」，
+        // 于是记失败、下个冷却再撞一遍。
         //
-        // 只有在「座位数读得出来」且「已坐人数已知」时才下结论；任何一边读不到都放行，
-        // 保持旧行为（宁可让游戏自己拒绝，也不要因为新判据读失败而漏掉真的能上的机会）。
+        // 【保守闸，v1.1.3】v1.1.2 在这里栽过大跟头：当时 GetMountedEntityIds 把
+        // FixedSizeArray7 的 7 个槽位（含空槽 0）原样返回，occupantIds.Length 恒等于 7，
+        // occupied >= seatCount 几乎永远成立 → 所有候选都被判满员跳过 → 插件再也不上车。
+        // 现在即使零值过滤已经修好，仍加三道保险，任何「数据可疑」的情况一律放行，
+        // 宁可让游戏自己拒绝，也绝不因为一个新判据误判而漏掉真的能上的机会：
+        //   1. 只认确认过的多座坐骑（seatCount >= 2）；
+        //   2. occupant 数必须 < 7（= FixedSizeArray7 的物理上限），到顶就不信任；
+        //   3. occupied 不能超过座位数（否则说明口径算错了，放行）。
         if (MountData.IsLoaded)
         {
             var extraSeats = MountData.GetExtraSeats(mountId);
             if (extraSeats.HasValue)
             {
                 var seatCount = 1 + extraSeats.Value;
-                var occupantIds = GameApi.GetMountedEntityIds(rider);
-
-                // MountedEntityIds 到底含不含骑手自己，客户端各版本实现不一致，
-                // 所以用「列表里有没有骑手自己的 EntityId」来判定口径，两种都能算对。
-                if (occupantIds.Length > 0)
+                if (seatCount >= 2)
                 {
-                    var riderIncluded = false;
-                    var riderEntityId = rider.EntityId;
-                    for (var i = 0; i < occupantIds.Length; i++)
+                    var occupantIds = GameApi.GetMountedEntityIds(rider);
+                    var trustworthy = occupantIds.Length > 0 && occupantIds.Length < 7;
+
+                    // MountedEntityIds 到底含不含骑手自己，客户端各版本实现不一致，
+                    // 用「列表里有没有骑手自己的 EntityId」判口径，两种都能算对。
+                    if (trustworthy)
                     {
-                        if (riderEntityId != 0 && occupantIds[i] == riderEntityId)
+                        var riderIncluded = false;
+                        var riderEntityId = rider.EntityId;
+                        for (var i = 0; i < occupantIds.Length; i++)
                         {
-                            riderIncluded = true;
-                            break;
+                            if (riderEntityId != 0 && occupantIds[i] == riderEntityId)
+                            {
+                                riderIncluded = true;
+                                break;
+                            }
+                        }
+
+                        // 含骑手 → 已坐人数就是列表长度；不含骑手 → 列表长度再 +1。
+                        var occupied = riderIncluded ? occupantIds.Length : occupantIds.Length + 1;
+                        if (occupied > seatCount)
+                        {
+                            trustworthy = false; // 坐的人数比座位还多，口径不对，别拿它下结论
+                        }
+                        else if (occupied >= seatCount)
+                        {
+                            if (Config.DebugLog)
+                            {
+                                this.log.Information(
+                                    "[PillionRider] 跳过满员坐骑：{Name} 的 {Mount} 座位 {SeatCount} 个，已坐 {Occupied} 人",
+                                    rider.Name != null ? rider.Name.ToString() : rider.GameObjectId.ToString(),
+                                    mountId,
+                                    seatCount,
+                                    occupied);
+                            }
+
+                            return false;
                         }
                     }
 
-                    // 含骑手 → 已坐人数就是列表长度；不含骑手 → 列表长度再 +1。
-                    var occupied = riderIncluded ? occupantIds.Length : occupantIds.Length + 1;
-
-                    if (occupied >= seatCount)
+                    if (Config.DebugLog && !trustworthy && occupantIds.Length > 0)
                     {
-                        if (Config.DebugLog)
-                        {
-                            this.log.Information(
-                                "[PillionRider] 跳过满员坐骑：{Name} 的 {Mount} 座位 {SeatCount} 个，已坐 {Occupied} 人",
-                                rider.Name != null ? rider.Name.ToString() : rider.GameObjectId.ToString(),
-                                mountId,
-                                seatCount,
-                                occupied);
-                        }
-
-                        return false;
+                        this.log.Information(
+                            "[PillionRider] 座位占用数据不可信（读到 {Count} 个 occupant），放行让游戏自己判：{Name} 的 {Mount}",
+                            occupantIds.Length,
+                            rider.Name != null ? rider.Name.ToString() : rider.GameObjectId.ToString(),
+                            mountId);
                     }
                 }
             }
@@ -1960,14 +2011,39 @@ public sealed class Plugin : IDalamudPlugin
             var modeText = GameApi.DescribeCharacterMode(obj);
             var modeLine = string.IsNullOrEmpty(modeText) ? string.Empty : $" 模式={modeText}";
 
-            if (GameApi.IsPillionPassenger(obj))
+            // v1.1.3：把「司机 / 乘客 / 步行」这个核心判据显式打出来，
+            // 并给司机附上「已坐人数 / 座位总数」，现场能直接核对为什么上 / 上不去。
+            var role = GameApi.ProbeMountRole(obj, out var roleMountId);
+            var roleText = role switch
             {
-                modeLine += "（乘客）";
+                MountRole.Driver => "司机",
+                MountRole.Passenger => "乘客",
+                MountRole.OnFoot => "步行",
+                _ => "未知(结构读不到)",
+            };
+            var roleLine = $" 身份={roleText}";
+
+            if (role == MountRole.Driver)
+            {
+                var occupantIds = GameApi.GetMountedEntityIds(obj);
+                var seatText = "座位?";
+                if (MountData.IsLoaded && roleMountId != 0)
+                {
+                    var extra = MountData.GetExtraSeats(roleMountId);
+                    if (extra.HasValue)
+                    {
+                        seatText = $"{1 + extra.Value}";
+                    }
+                }
+
+                // 已坐人数按 MountedEntityIds 里非 0 槽位算；司机本人不一定在列表里，
+                // 所以额外标一个「+司机」提示，避免把 1 误读成满员。
+                roleLine += $"（已登记 {occupantIds.Length} 人 / 座位 {seatText}，司机另算）";
             }
 
             var partyText = IsPartyMember(party, obj) ? "队" : "-";
 
-            this.Notify($"玩家#{playerIndex} {name} 骑乘={mountText} 队伍={partyText}{modeLine} goId={goId}");
+            this.Notify($"玩家#{playerIndex} {name} 骑乘={mountText} 队伍={partyText}{modeLine}{roleLine} goId={goId}");
             playerIndex++;
         }
 
